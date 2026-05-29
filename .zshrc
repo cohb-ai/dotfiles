@@ -68,17 +68,23 @@ dev() {
     return 1
   fi
 
-  # auto-pick next free slot (1-4) if not specified
+  # auto-pick slot: if no slot given, find one that exists but isn't attached,
+  # or create a new one if all existing are attached
   if [[ -z "$slot" ]]; then
     for n in 1 2 3 4; do
       local sname="dev-${repo}-${n}"
       if ! tmux has-session -t "$sname" 2>/dev/null; then
+        # free slot — use it
+        slot=$n
+        break
+      elif ! tmux list-clients -t "$sname" 2>/dev/null | grep -q .; then
+        # exists but not attached — reattach
         slot=$n
         break
       fi
     done
-    # if all slots exist, reattach slot 1
-    [[ -z "$slot" ]] && slot=1
+    # all 4 slots exist and are attached — overflow to slot 5
+    [[ -z "$slot" ]] && slot=5
   fi
 
   local session="dev-${repo}-${slot}"
