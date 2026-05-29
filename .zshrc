@@ -41,6 +41,9 @@ prview() {
 
 nosleep() { trap 'sudo pmset -a disablesleep 0' EXIT INT; sudo pmset -a disablesleep 1 && caffeinate -dimsu; }
 
+# dots — pull latest dotfiles and reload zsh
+dots() { cd ~/code/dotfiles && git pull && source ~/.zshrc && cd - > /dev/null; }
+
 # dev <repo> [slot] — open/reattach a Claude Code tmux session
 # repos: ff (financial-forecast), cfp (cashfwd-private), cf (cashfwd)
 # slot: optional 1-4, auto-picks next free slot if omitted
