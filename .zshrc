@@ -55,11 +55,15 @@ tpaste() {
   local uploaddir="$HOME/.tmux-logs/uploads"
   mkdir -p "$uploaddir"
 
-  # find latest image in iCloud Drive (recursive, any depth)
+  # find latest image — Screenshots folder first, fall back to full iCloud Drive
   local src
-  src=$(find "$icloud" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) \
-    -not -path '*/.Trash/*' \
-    | xargs ls -t 2>/dev/null | head -1)
+  src=$(find "$icloud/Screenshots" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) \
+    2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+  if [[ -z "$src" ]]; then
+    src=$(find "$icloud" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) \
+      -not -path '*/.Trash/*' \
+      | xargs ls -t 2>/dev/null | head -1)
+  fi
 
   if [[ -z "$src" ]]; then
     echo "No images found in iCloud Drive ($icloud)"
