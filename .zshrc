@@ -52,14 +52,17 @@ tpaste() {
   local slot="$2"
 
   local icloud="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
-  # find latest screenshot in iCloud Drive root (non-recursive, screenshots save here directly)
+  # verify iCloud Drive is accessible
+  if [[ ! -d "$icloud" ]]; then
+    echo "iCloud Drive not found at: $icloud"
+    return 1
+  fi
+  # find latest screenshot in iCloud Drive root
   local src
-  src=$(find "$icloud" -maxdepth 1 -type f \( -iname 'Screenshot*.png' -o -iname 'Screenshot*.jpg' \) \
-    | xargs ls -t 2>/dev/null | head -1)
-  # fall back to any image in root if no Screenshot-named file found
+  src=$(ls -t "$icloud"/Screenshot*.png "$icloud"/Screenshot*.jpg 2>/dev/null | head -1)
+  # fall back to any image in root
   if [[ -z "$src" ]]; then
-    src=$(find "$icloud" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) \
-      | xargs ls -t 2>/dev/null | head -1)
+    src=$(ls -t "$icloud"/*.png "$icloud"/*.jpg "$icloud"/*.jpeg "$icloud"/*.heic 2>/dev/null | head -1)
   fi
 
   if [[ -z "$src" ]]; then
