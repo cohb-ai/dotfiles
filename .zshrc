@@ -424,8 +424,8 @@ tread() {
 # Echoes the chosen row as "<session-id>\t<cwd>\t<display>" (fzf only shows the
 # display column). Newest-first by transcript mtime; the JSONL is parsed once in
 # python for each file's real cwd (the `cwd` field, not the lossy folder name),
-# its title (the latest `aiTitle` — the session name Claude generates —
-# falling back to the first human message). With a <cwd> arg, only sessions
+# its title — preferring a /rename `customTitle`, then the generated `aiTitle`,
+# then the first human message. With a <cwd> arg, only sessions
 # whose cwd is that dir or below are shown; omit it to list every project.
 # Returns nonzero on no pick / no fzf.
 _claude_sessions_fzf() {
@@ -449,16 +449,21 @@ filt = sys.argv[2] if len(sys.argv) > 2 else ''
 rows = []
 for f in glob.glob(os.path.join(root, '*', '*.jsonl')):
     sid = os.path.basename(f)[:-6]
-    cwd = msg = title = None
+    cwd = msg = title = ctitle = None
     try:
         for line in open(f, errors='ignore'):
             if cwd is None and '"cwd"' in line:
                 try: cwd = json.loads(line).get('cwd')
                 except ValueError: pass
+            if '"custom-title"' in line:                # set by /rename — wins
+                try:
+                    t = json.loads(line).get('customTitle')
+                    if t: ctitle = t                    # keep the most recent
+                except ValueError: pass
             if '"ai-title"' in line:
                 try:
                     t = json.loads(line).get('aiTitle')
-                    if t: title = t                 # keep the most recent
+                    if t: title = t                     # keep the most recent
                 except ValueError: pass
             if msg is None and '"type":"user"' in line:
                 try:
@@ -475,7 +480,7 @@ for f in glob.glob(os.path.join(root, '*', '*.jsonl')):
         continue
     mtime = os.path.getmtime(f)
     short = os.path.basename(cwd) if cwd else '?'
-    title = ' '.join((title or msg or '(no message)').split())[:80]
+    title = ' '.join((ctitle or title or msg or '(no message)').split())[:80]
     rows.append((mtime, sid, cwd or '?', short, title))
 rows.sort(reverse=True)
 for mtime, sid, cwd, short, title in rows:
