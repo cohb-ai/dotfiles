@@ -200,12 +200,22 @@ tgo() {
   fi
 }
 
-# dev <repo> [slot] — open/reattach a Claude Code tmux session
+# dev <repo> [slot] [--no-tmux] — open/reattach a Claude Code tmux session
 # repos: ff (financial-forecast), cfp (cashfwd-private), cf (cashfwd)
 # slot: optional 1-4, auto-picks next free slot if omitted
+# --no-tmux: run the git setup + claude inline in this terminal, no tmux session
 dev() {
-  local repo="$1"
-  local slot="$2"
+  local no_tmux=
+  local -a pos
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --no-tmux) no_tmux=1 ;;
+      *)         pos+=("$arg") ;;
+    esac
+  done
+  local repo="${pos[1]}"
+  local slot="${pos[2]}"
 
   local -A repo_paths
   repo_paths[ff]="$HOME/code/financial-forecast"
@@ -213,10 +223,11 @@ dev() {
   repo_paths[cf]="$HOME/code/cashfwd"
 
   if [[ -z "$repo" || -z "${repo_paths[$repo]}" ]]; then
-    echo "Usage: dev <ff|cfp|cf> [slot]"
+    echo "Usage: dev <ff|cfp|cf> [slot] [--no-tmux]"
     echo "  ff  → financial-forecast"
     echo "  cfp → cashfwd-private"
     echo "  cf  → cashfwd"
+    echo "  --no-tmux → run git setup + claude inline (no tmux session)"
     return 1
   fi
 
@@ -225,6 +236,16 @@ dev() {
   if [[ ! -d "$dir" ]]; then
     echo "Repo dir not found: $dir"
     return 1
+  fi
+
+  # --no-tmux: cd into the repo, do the same branch setup, run claude inline.
+  # No session/slot/logging — slot is a tmux concept, so skip it entirely.
+  if [[ -n "$no_tmux" ]]; then
+    echo "Starting claude in $dir (no tmux)"
+    cd "$dir" || return 1
+    git stash; git fetch origin; git checkout dev/claude-1 2>/dev/null || git checkout -b dev/claude-1; git pull origin dev/claude-1
+    claude
+    return
   fi
 
   # auto-pick slot: find a free or unattached slot, or create the next one
@@ -338,9 +359,16 @@ help() {
     "Keep the Mac awake:nosleep sleep-manager"
   )
 
-  # Colour, suppressed when output isn't a terminal (so pipes stay clean).
-  local H C R
-  if [[ -t 1 ]]; then H=$'\e[1;38;5;212m'; C=$'\e[38;5;79m'; R=$'\e[0m'; fi
+  # Palette — bold, UPPERCASE section headers (man-page / `gh` convention; bold is
+  # the real separator, colour just a hint). Suppressed when stdout isn't a
+  # terminal, so piped/grep'd output stays plain.
+  local H C D R
+  if [[ -t 1 ]]; then
+    H=$'\e[1;38;5;111m'   # bold periwinkle — section headers
+    C=$'\e[38;5;150m'     # soft green      — command names
+    D=$'\e[2m'            # dim             — intro line
+    R=$'\e[0m'
+  fi
 
   _help_group() {                       # $1 = title, $2… = command names
     local title=$1; shift
@@ -350,14 +378,14 @@ help() {
       have+=$n; (( ${#${info[$n]%% — *}} > w )) && w=${#${info[$n]%% — *}}
     done
     (( ${#have} )) || return
-    print -r -- "${H}${title}${R}"
+    print -r -- "${H}${(U)title}${R}"             # UPPERCASE, bold header
     for n in $have; do
       printf '  %s%-*s%s  %s\n' "$C" $w "${info[$n]%% — *}" "$R" "${info[$n]#* — }"
     done
     print
   }
 
-  print -r -- "${H}Dotfiles commands${R}"; print
+  print -r -- "${D}Custom commands — 'help' to list, 'dots' to edit & reload.${R}"; print
   typeset -A shown
   local -a names
   for g in $groups; do
@@ -377,8 +405,10 @@ help() {
 # `dev <Tab>` → ff cfp cf, `csync <Tab>` → push pull, etc. These helper names
 # start with `_` so the `help` parser above skips them.
 _ff_repos()     { _arguments '1:repo:(ff cfp cf)' '2:slot:(1 2 3 4)' }
+_dev_repos()    { _arguments '1:repo:(ff cfp cf)' '2:slot:(1 2 3 4)' '*:flag:(--no-tmux)' }
 _csync_dir()    { _arguments '1:direction:(push pull)' }
 _sleepmgr_cmd() { _arguments '1:command:(status disable enable help)' }
-compdef _ff_repos     dev tgo tpaste tread
+compdef _dev_repos    dev
+compdef _ff_repos     tgo tpaste tread
 compdef _csync_dir    csync
 compdef _sleepmgr_cmd sleep-manager
