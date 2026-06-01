@@ -199,15 +199,30 @@ tpaste() {
   tmux attach-session -t "$session"
 }
 
+# _dev_session_has_claude <session> — true if any pane in the session has a live
+# `claude` child process. We deliberately do NOT use pane_current_command:
+# Claude sets its process title to its version string (e.g. "2.1.159"), so it
+# never reads as "claude"/"node" there. The pane shell's direct children are the
+# reliable signal (dev sessions launch `claude` straight off the shell), and
+# this survives whatever Claude calls itself next version.
+_dev_session_has_claude() {
+  local s="$1" pane_pid child comm
+  for pane_pid in ${(f)"$(tmux list-panes -t "$s" -F '#{pane_pid}' 2>/dev/null)"}; do
+    for child in ${(f)"$(pgrep -P "$pane_pid" 2>/dev/null)"}; do
+      comm=$(ps -o comm= -p "$child" 2>/dev/null)
+      case "${comm:t}" in (claude|node) return 0 ;; esac
+    done
+  done
+  return 1
+}
+
 # _dev_list — print every dev-<repo>-<slot> tmux session on two axes:
 #   ● attached / ○ detached   (any client viewing it)
-#   ✓ active context          (pane foreground is node/claude = Claude alive
-#                              with its conversation loaded; blank once it exits
-#                              to a shell). These are independent: a detached
-#                              session can still hold a live Claude.
-# Shared by `dev list` and bare `tgo`. session_attached/session_path are
-# session-level formats; pane_current_command needs a per-session
-# display-message (not a session format), hence the loop.
+#   ✓ active context          (a live claude process in the session = Claude
+#                              alive with its conversation loaded; blank once it
+#                              exits to a shell). Independent of attach state: a
+#                              detached session can still hold a live Claude.
+# Shared by `dev list` and bare `tgo`.
 _dev_list() {
   local names
   names=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^dev-' | sort)
@@ -218,16 +233,12 @@ _dev_list() {
   local g c r0=
   if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; r0=$'\e[0m'; fi
   print -r -- "dev sessions  (● attached · ✓ Claude has active context)"
-  local s state cmd dir amark cmark
+  local s state dir amark cmark
   while IFS= read -r s; do
     state=$(tmux display-message -p -t "$s" '#{?session_attached,attached,detached}' 2>/dev/null)
-    cmd=$(tmux display-message -p -t "$s" '#{pane_current_command}' 2>/dev/null)
     dir=$(tmux display-message -p -t "$s" '#{session_path}' 2>/dev/null)
     if [[ $state == attached ]]; then amark="${g}●${r0}"; else amark='○'; fi
-    case "$cmd" in
-      node|claude) cmark="${c}✓${r0}" ;;
-      *)           cmark=' ' ;;
-    esac
+    if _dev_session_has_claude "$s"; then cmark="${c}✓${r0}"; else cmark=' '; fi
     printf '  %s %s %-13s %-9s %s\n' "$amark" "$cmark" "$s" "$state" "${dir/#$HOME/~}"
   done <<< "$names"
 }
@@ -291,7 +302,7 @@ _dev_new_session() {
 }
 
 # dev <repo> [slot] [--no-tmux] — open/reattach a Claude Code tmux session
-# dev list — show all dev sessions, marking attached + active Claude context
+# dev list | dev ls — show all dev sessions, marking attached + active context
 # repos: ff (financial-forecast), cfp (cashfwd-private), cf (cashfwd)
 # slot: optional 1-4, auto-picks next free slot if omitted
 # --no-tmux: run the git setup + claude inline in this terminal, no tmux session
@@ -592,7 +603,7 @@ help() {
 
   # `dev list` is a subcommand, not its own function, so the parser only captured
   # `dev`'s first comment line — synthesise an entry so the subcommand is listed.
-  info[dev-list]="dev list — list dev sessions, marking attached + active Claude context"
+  info[dev-list]="dev list|ls — list dev sessions, marking attached + active Claude context"
 
   # Grouping by purpose.  "Title:cmd cmd …" — drop a command's name into a group
   # to file it; anything uncategorized falls through to "Other" at the end.
