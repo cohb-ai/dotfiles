@@ -488,17 +488,13 @@ _dev_resume_session() {
 # This is the glue that makes a resumed session "supported by dev": pick the
 # DEV_REPOS key whose path matches <cwd>, then choose a free slot for it.
 #
-# TODO(you): implement the mapping. Decisions worth making:
-#   • Match: exact ($cwd == path) only, or also accept worktrees/subdirs of a
-#     repo (cwd starts with "$path/")? Subdir matching is friendlier but can
-#     mis-bucket nested repos.
-#   • No match (cwd isn't a DEV_REPOS repo): give up (echo nothing → tpush
-#     errors out), or fall back to a key derived from the dir's basename so any
-#     session is resumable? The latter means tgo/tread won't know that key.
-#   • Slot: reuse the "next free slot" loop from `dev`/`tpaste` (scan
-#     dev-<repo>-<n> with `tmux has-session` until one is free).
-# DEV_REPOS (global, associative: key→path) and `tmux has-session -t NAME` are
-# your building blocks.
+# Mapping rules:
+#   • Match: exact path, or a worktree/subdir of a repo (cwd under "$path/").
+#     Longest matching path wins, so a nested repo beats its parent.
+#   • No match: fall back to a key derived from the dir's basename so ANY repo
+#     is resumable. tgo/tread only validate DEV_REPOS keys, so tpush prints a
+#     raw `tmux attach` hint for these derived keys.
+#   • Slot: first dev-<repo>-<n> with no running session (mirrors `dev`).
 _dev_slot_for_cwd() {
   local cwd="$1" key match
   # Find the DEV_REPOS key for this cwd. Prefer an exact path match; otherwise
@@ -581,11 +577,24 @@ tpush() {
 
   [[ -d $cwd ]] || { echo "Session's directory no longer exists: $cwd"; return 1; }
 
-  local repo slot
-  read -r repo slot < <(_dev_slot_for_cwd "$cwd")
-  [[ -n $repo && -n $slot ]] || { echo "Couldn't map $cwd to a dev slot."; return 1; }
+  # Already backgrounded? If this exact conversation is running under any slot,
+  # reuse it rather than spawning a duplicate. _dev_resume_session stashes
+  # CLAUDE_RESUME_ID on each session, so we match on that.
+  local repo slot session existing s
+  for s in ${(f)"$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^dev-')"}; do
+    if [[ "$(tmux show-environment -t "$s" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)" == "$sid" ]]; then
+      existing="$s"; break
+    fi
+  done
 
-  local session="dev-${repo}-${slot}"
+  if [[ -n $existing ]]; then
+    session="$existing"
+    local rest=${existing#dev-}; slot=${rest##*-}; repo=${rest%-*}
+  else
+    read -r repo slot < <(_dev_slot_for_cwd "$cwd")
+    [[ -n $repo && -n $slot ]] || { echo "Couldn't map $cwd to a dev slot."; return 1; }
+    session="dev-${repo}-${slot}"
+  fi
 
   # tgo/tread only understand DEV_REPOS keys; for a derived key, point at raw tmux.
   local attach_hint
@@ -595,13 +604,16 @@ tpush() {
     attach_hint="Attach: tmux attach -t $session"
   fi
 
-  if tmux has-session -t "$session" 2>/dev/null; then
-    echo "$session is already running — ${attach_hint#Attach: }"
-    return 0
+  if [[ -n $existing ]]; then
+    echo "This conversation is already backgrounded in $session."
+  elif tmux has-session -t "$session" 2>/dev/null; then
+    # _dev_slot_for_cwd picks a free slot, so this only trips on a race.
+    echo "$session already exists for another session — ${attach_hint#Attach: }"
+    return 1
+  else
+    _dev_resume_session "$session" "$cwd" "$sid"
+    echo "Resumed ${sid[1,8]}… in detached $session ($cwd)"
   fi
-
-  _dev_resume_session "$session" "$cwd" "$sid"
-  echo "Resumed ${sid[1,8]}… in detached $session ($cwd)"
 
   # Current-session mode with a listening claude() wrapper: arm the one-shot
   # sentinel so leaving this Claude auto-attaches you into $session. Otherwise
