@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # csync — two-way sync of Claude Code session history with iCloud Drive.
 # One command, no direction: merges both ways (newest file wins, nothing
 # deleted) so every machine converges to the union of all sessions. Safe to
