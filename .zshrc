@@ -59,11 +59,12 @@ for _repo in ${(k)DEV_REPOS}; do
 done
 unset _repo
 
-# csync [push|pull] — sync Claude Code session history to/from iCloud Drive
-# csync push  → upload ~/.claude/projects/ to iCloud (default if no arg)
-# csync pull  → download from iCloud to ~/.claude/projects/
+# csync — two-way sync of Claude Code session history with iCloud Drive.
+# One command, no direction: merges both ways (newest file wins, nothing
+# deleted) so every machine converges to the union of all sessions. Just run
+# `csync` on each machine. Safe to run anytime; --update means it never
+# clobbers a newer copy and --no-delete means it never removes sessions.
 csync() {
-  local direction="${1:-push}"
   local icloud="$HOME/Library/Mobile Documents/com~apple~CloudDocs/claude-sessions"
   local local_dir="$HOME/.claude/projects"
 
@@ -72,39 +73,27 @@ csync() {
     return 1
   fi
 
-  mkdir -p "$icloud"
-  mkdir -p "$local_dir"
+  mkdir -p "$icloud" "$local_dir"
 
-  case "$direction" in
-    push)
-      echo "↑ Pushing $local_dir → iCloud (merge, no delete)"
-      rsync -av --update \
-        --exclude='.DS_Store' \
-        "$local_dir/" "$icloud/"
-      ;;
-    pull)
-      # iCloud may keep file *contents* evicted (dataless placeholders) even
-      # though the names show up. rsync reads via mmap, which times out on those
-      # ("mmap: Operation timed out") instead of fetching them — and aborts the
-      # transfer. So force evicted files local first: ask the daemon to fetch
-      # (brctl), then a plain read() blocks until the bytes land.
-      echo "↓ Materialising cloud-only files in iCloud…"
-      find "$icloud" -type f ! -name '.DS_Store' -exec brctl download {} + 2>/dev/null
-      local f
-      find "$icloud" -type f ! -name '.DS_Store' -print0 2>/dev/null | while IFS= read -r -d '' f; do
-        [[ "$(stat -f '%b' "$f" 2>/dev/null)" -eq 0 && "$(stat -f '%z' "$f" 2>/dev/null)" -gt 0 ]] \
-          && cat "$f" >/dev/null 2>&1
-      done
-      echo "↓ Pulling iCloud → $local_dir"
-      rsync -av --update \
-        --exclude='.DS_Store' \
-        "$icloud/" "$local_dir/"
-      ;;
-    *)
-      echo "Usage: csync [push|pull]"
-      return 1
-      ;;
-  esac
+  # iCloud may keep file *contents* evicted (dataless placeholders) even though
+  # the names show up. rsync reads via mmap, which times out on those ("mmap:
+  # Operation timed out") instead of fetching them — and aborts. So force
+  # evicted files local first: ask the daemon to fetch (brctl), then a plain
+  # read() blocks until the bytes land.
+  echo "⟳ Materialising cloud-only files in iCloud…"
+  find "$icloud" -type f ! -name '.DS_Store' -exec brctl download {} + 2>/dev/null
+  local f
+  find "$icloud" -type f ! -name '.DS_Store' -print0 2>/dev/null | while IFS= read -r -d '' f; do
+    [[ "$(stat -f '%b' "$f" 2>/dev/null)" -eq 0 && "$(stat -f '%z' "$f" 2>/dev/null)" -gt 0 ]] \
+      && cat "$f" >/dev/null 2>&1
+  done
+
+  # Merge both directions: iCloud → local, then local → iCloud. --update keeps
+  # the newer side on each file; no --delete, so sessions only ever accumulate.
+  echo "⟳ Syncing iCloud ↔ $local_dir"
+  rsync -a --update --exclude='.DS_Store' "$icloud/" "$local_dir/"
+  rsync -a --update --exclude='.DS_Store' "$local_dir/" "$icloud/"
+  echo "✓ csync complete"
 }
 
 # _tpaste_claude_ready <session> — return 0 once Claude is accepting input in
@@ -787,13 +776,11 @@ help() {
 
 # --- tab completion for our commands -------------------------------------
 # compinit already ran at the top of this file, so compdef is available here.
-# `dev <Tab>` → ff cfp cf, `csync <Tab>` → push pull, etc. These helper names
-# start with `_` so the `help` parser above skips them.
+# `dev <Tab>` → ff cfp cf, etc. These helper names start with `_` so the `help`
+# parser above skips them. (csync takes no args, so it needs no completion.)
 _ff_repos()     { _arguments '1:repo:(ff cfp cf)' '2:slot:(1 2 3 4)' }
 _dev_repos()    { _arguments '1:repo:(ff cfp cf)' '2:slot:(1 2 3 4)' '*:flag:(--no-tmux)' }
-_csync_dir()    { _arguments '1:direction:(push pull)' }
 _sleepmgr_cmd() { _arguments '1:command:(status disable enable help)' }
 compdef _dev_repos    dev
 compdef _ff_repos     tgo tpaste tread
-compdef _csync_dir    csync
 compdef _sleepmgr_cmd sleep-manager
