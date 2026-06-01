@@ -45,6 +45,20 @@ nosleep() { trap 'sudo pmset -a disablesleep 0' EXIT INT; sudo pmset -a disables
 # dots — pull latest dotfiles and reload zsh
 dots() { cd ~/code/dotfiles && git pull && source ~/.zshrc && cd - > /dev/null; }
 
+# DEV_REPOS — single source of truth for the repos `dev` and the cd shortcuts
+# below both understand. Add a repo here and it gains a `dev <key>` session AND a
+# bare `<key>` cd shortcut, with no second list to keep in sync.
+typeset -gA DEV_REPOS
+DEV_REPOS[ff]="$HOME/code/financial-forecast"
+DEV_REPOS[cfp]="$HOME/code/cashfwd-private"
+DEV_REPOS[cf]="$HOME/code/cashfwd"
+
+# Generate a cd shortcut per repo: `ff`, `cfp`, `cf` jump straight to the dir.
+for _repo in ${(k)DEV_REPOS}; do
+  alias "$_repo"="cd ${DEV_REPOS[$_repo]}"
+done
+unset _repo
+
 # csync [push|pull] — sync Claude Code session history to/from iCloud Drive
 # csync push  → upload ~/.claude/projects/ to iCloud (default if no arg)
 # csync pull  → download from iCloud to ~/.claude/projects/
@@ -83,18 +97,17 @@ csync() {
 
 # _tpaste_claude_ready <session> — return 0 once Claude is accepting input in
 # the session's pane, else return 1. tpaste polls this after launching a fresh
-# session so it knows when the path can be delivered. `tmux capture-pane -p`
-# dumps the pane's current visible text; decide which marker means "Claude has
-# finished booting (past the git checkout) and its input box is live."
+# session so it knows when the path can be delivered.
 _tpaste_claude_ready() {
   local session="$1"
-  local pane
-  pane=$(tmux capture-pane -p -t "$session" 2>/dev/null)
-  # TODO(you): return 0 when $pane shows Claude is ready for input, else 1.
-  #   Capture a freshly-started session with `tmux capture-pane -p -t dev-ff-1`
-  #   and pick a string that appears ONLY once the prompt is live — e.g. the
-  #   "? for shortcuts" footer or the input-box border — then match it here,
-  #   for example:  [[ $pane == *"? for shortcuts"* ]] && return 0
+  # The session bootstraps with `git …; claude`. While the git dance runs the
+  # pane's foreground command is git/zsh; once Claude (a Node CLI) takes over it
+  # becomes node. That process hand-off is a more robust readiness signal than
+  # matching Claude's TUI text, which changes between versions. To gate on the
+  # actual prompt instead, swap in a `tmux capture-pane -p` string match.
+  local cmd
+  cmd=$(tmux display-message -p -t "$session" '#{pane_current_command}' 2>/dev/null)
+  [[ $cmd == node || $cmd == claude ]] && return 0
   return 1
 }
 
@@ -134,12 +147,9 @@ tpaste() {
   echo "Using: $src"
 
   # find session
-  local -A repo_paths
-  repo_paths[ff]="$HOME/code/financial-forecast"
-  repo_paths[cfp]="$HOME/code/cashfwd-private"
-  repo_paths[cf]="$HOME/code/cashfwd"
+  # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
 
-  if [[ -z "${repo_paths[$repo]}" ]]; then
+  if [[ -z "${DEV_REPOS[$repo]}" ]]; then
     echo "Unknown repo: $repo. Use ff, cfp, or cf."
     return 1
   fi
@@ -170,16 +180,19 @@ tpaste() {
 
   # new session → bootstrap Claude, wait for it to come up, queue the path, attach
   echo "Starting $session for the screenshot…"
-  _dev_new_session "$session" "${repo_paths[$repo]}"
+  _dev_new_session "$session" "${DEV_REPOS[$repo]}"
 
-  # wait (up to ~30s) for Claude to be ready before delivering the path; if the
-  # readiness check is left unimplemented this degrades to a plain 30s wait
+  # wait (up to ~30s) for Claude's process to take over the pane; if the
+  # readiness check never matches this degrades to a plain 30s wait
   local waited=0
   while (( waited < 30 )); do
     _tpaste_claude_ready "$session" && break
     sleep 1
     (( waited++ ))
   done
+  # brief settle: the node process exists a beat before its input box mounts,
+  # and keystrokes sent into that gap get dropped
+  sleep 1
 
   tmux send-keys -t "$session" "$src"
   echo "Queued path in $session — attaching; press Enter to send to Claude."
@@ -200,12 +213,9 @@ tgo() {
     return
   fi
 
-  local -A repo_paths
-  repo_paths[ff]="$HOME/code/financial-forecast"
-  repo_paths[cfp]="$HOME/code/cashfwd-private"
-  repo_paths[cf]="$HOME/code/cashfwd"
+  # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
 
-  if [[ -z "${repo_paths[$repo]}" ]]; then
+  if [[ -z "${DEV_REPOS[$repo]}" ]]; then
     echo "Unknown repo: $repo. Use ff, cfp, or cf."
     return 1
   fi
@@ -264,12 +274,9 @@ dev() {
   local repo="${pos[1]}"
   local slot="${pos[2]}"
 
-  local -A repo_paths
-  repo_paths[ff]="$HOME/code/financial-forecast"
-  repo_paths[cfp]="$HOME/code/cashfwd-private"
-  repo_paths[cf]="$HOME/code/cashfwd"
+  # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
 
-  if [[ -z "$repo" || -z "${repo_paths[$repo]}" ]]; then
+  if [[ -z "$repo" || -z "${DEV_REPOS[$repo]}" ]]; then
     echo "Usage: dev <ff|cfp|cf> [slot] [--no-tmux]"
     echo "  ff  → financial-forecast"
     echo "  cfp → cashfwd-private"
@@ -278,7 +285,7 @@ dev() {
     return 1
   fi
 
-  local dir="${repo_paths[$repo]}"
+  local dir="${DEV_REPOS[$repo]}"
 
   if [[ ! -d "$dir" ]]; then
     echo "Repo dir not found: $dir"
@@ -338,12 +345,9 @@ tread() {
   local repo="$1"
   local slot="${2:-1}"
 
-  local -A repo_paths
-  repo_paths[ff]="$HOME/code/financial-forecast"
-  repo_paths[cfp]="$HOME/code/cashfwd-private"
-  repo_paths[cf]="$HOME/code/cashfwd"
+  # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
 
-  if [[ -z "$repo" || -z "${repo_paths[$repo]}" ]]; then
+  if [[ -z "$repo" || -z "${DEV_REPOS[$repo]}" ]]; then
     echo "Usage: tread <ff|cfp|cf> [slot]"
     # list available logs
     echo "Available logs:"

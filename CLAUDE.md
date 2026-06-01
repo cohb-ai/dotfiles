@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow
+
+After every change you make in this repo, commit and push it (directly to `main` — this is a personal single-author repo). No need to ask first.
+
 ## What this is
 
 Personal macOS dotfiles: zsh config, utility scripts, and Claude Code config. No build system, no tests, no dependencies — just shell files and a Bash install script.
