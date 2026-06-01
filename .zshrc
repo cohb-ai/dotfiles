@@ -530,6 +530,31 @@ _dev_slot_for_cwd() {
   return 1
 }
 
+# claude — thin wrapper around the real `claude` CLI that makes tpush's
+# "background this conversation" flow seamless. Before launching, it arms a
+# one-shot sentinel file (path passed to Claude via CLAUDE_TPUSH_ATTACH). If
+# tpush — run as /tpush from inside the session — writes a tmux session name
+# there, then the moment you leave Claude (/exit or Ctrl-D) we attach you
+# straight into that backgrounded session instead of dropping you at a bare
+# prompt. No sentinel written → behaves exactly like plain `claude`. tpush
+# can't do this itself: it runs in Claude's Bash subprocess, which has no TTY
+# to attach and can't exit its own parent — the attach must happen out here.
+claude() {
+  local sentinel="${TMPDIR:-/tmp}/claude-tpush-attach.$$"
+  rm -f "$sentinel"
+  CLAUDE_TPUSH_ATTACH="$sentinel" command claude "$@"
+  local rc=$?
+  if [[ -s "$sentinel" ]]; then
+    local target="$(<"$sentinel")"
+    rm -f "$sentinel"
+    if [[ -n "$target" ]] && tmux has-session -t "$target" 2>/dev/null; then
+      echo "Attaching to backgrounded $target…"
+      exec tmux attach -t "$target"
+    fi
+  fi
+  return $rc
+}
+
 # tpush [-p] — push a Claude session into a detached background tmux session
 # Resumes via `claude -r`, named to fit the dev/tgo/tread family.
 #   • Run from INSIDE Claude (CLAUDE_CODE_SESSION_ID set): grabs THIS session +
@@ -577,8 +602,17 @@ tpush() {
 
   _dev_resume_session "$session" "$cwd" "$sid"
   echo "Resumed ${sid[1,8]}… in detached $session ($cwd)"
-  echo "$attach_hint"
-  [[ -n $CLAUDE_CODE_SESSION_ID ]] && echo "(Exit this foreground Claude — the tmux copy now owns the conversation.)"
+
+  # Current-session mode with a listening claude() wrapper: arm the one-shot
+  # sentinel so leaving this Claude auto-attaches you into $session. Otherwise
+  # (picker mode, or an un-wrapped/older shell) fall back to the manual hint.
+  if [[ -n $CLAUDE_CODE_SESSION_ID && -n $CLAUDE_TPUSH_ATTACH ]]; then
+    print -r -- "$session" > "$CLAUDE_TPUSH_ATTACH"
+    echo "→ Type /exit (or Ctrl-D) and you'll drop into $session automatically."
+  else
+    echo "$attach_hint"
+    [[ -n $CLAUDE_CODE_SESSION_ID ]] && echo "(Exit this foreground Claude — the tmux copy now owns the conversation.)"
+  fi
 }
 
 # tpop [repo|session] [slot] — migrate a tmux'd Claude session back to foreground
