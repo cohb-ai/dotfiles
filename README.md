@@ -4,7 +4,8 @@ Personal shell config and utility scripts.
 
 ## Layout
 
-- `.zshrc` — zsh shell config (aliases, functions, PATH; includes the `nosleep` one-liner)
+- `.zshrc` — zsh shell config (aliases, functions, PATH, tab completions). Run
+  `help` for a live, auto-generated list of every command defined here.
 - `bin/` — utility scripts (added to PATH)
   - `sleep-manager` — manage macOS sleep behavior (`status`, `disable`, `enable`)
 - `claude/` — Claude Code config
@@ -14,6 +15,21 @@ Personal shell config and utility scripts.
 
 The files in this repo are the source of truth. `~/.zshrc`, `~/bin/<script>`, and
 `~/.claude/settings.json` are symlinks back into this repo, so editing either side edits both.
+
+## The `help` command
+
+`help` prints every custom command. The list is **generated at call time**, not
+stored: it reads the leading `# name <args> — description` comment above each
+`.zshrc` function and the header line of each `bin/` script. So a new command
+shows up automatically — just give it that one-line comment in the same format.
+
+`help` renders with the prettiest tool it finds, falling back so it never breaks:
+
+1. [`gum`](https://github.com/charmbracelet/gum) — `brew install gum` (nicest)
+2. [`glow`](https://github.com/charmbracelet/glow) — `brew install glow`
+3. plain aligned columns — no dependency
+
+Both renderers are optional; with neither installed you still get a clean list.
 
 ## Claude plugins & MCP
 
