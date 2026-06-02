@@ -38,5 +38,6 @@
       }
     }
   },
-  "skipAutoPermissionPrompt": true
+  "skipAutoPermissionPrompt": true,
+  "model": "opus"
 }
