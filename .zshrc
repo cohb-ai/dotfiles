@@ -412,6 +412,47 @@ tread() {
     | less -R +G
 }
 
+# tplan [pattern] — fzf-pick and render a Claude plan as markdown
+# tplan           → pick from all plans, newest first
+# tplan ally      → filter to plans whose filename contains "ally"
+tplan() {
+  local plandir="$HOME/.claude/plans"
+  local pattern="${1:-}"
+
+  if [[ ! -d "$plandir" ]]; then
+    echo "No plans directory: $plandir" >&2
+    return 1
+  fi
+
+  # Collect .md files newest-first; filter by pattern when given
+  local -a files
+  files=("${(@f)$(ls -t "$plandir"/*.md 2>/dev/null)}")
+  if [[ -n "$pattern" ]]; then
+    files=("${(@M)files:#*${pattern}*}")
+  fi
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo "No plans found${pattern:+ matching '$pattern'}" >&2
+    return 1
+  fi
+
+  local chosen
+  if [[ ${#files[@]} -eq 1 ]]; then
+    chosen="${files[1]}"
+  else
+    chosen=$(printf '%s\n' "${files[@]}" | sed 's|.*/||; s|\.md$||' \
+      | fzf --prompt="plan> " --height=~12 --no-sort)
+    [[ -z "$chosen" ]] && return 0
+    chosen="$plandir/$chosen.md"
+  fi
+
+  if command -v glow &>/dev/null; then
+    glow -p "$chosen"
+  else
+    less "$chosen"
+  fi
+}
+
 # _claude_sessions_fzf [cwd] — fzf-pick a saved Claude transcript.
 # Echoes the chosen row as "<session-id>\t<cwd>\t<display>" (fzf only shows the
 # display column). Newest-first by transcript mtime; the JSONL is parsed once in
@@ -756,7 +797,7 @@ help() {
   local -a groups=(
     "Dotfiles & shell:dots help"
     "Git & PRs:prview"
-    "Claude dev sessions (tmux):dev dev-list tgo tread tpaste tpush tpop ${(kj: :)DEV_REPOS}"
+    "Claude dev sessions (tmux):dev dev-list tgo tread tpaste tpush tpop tplan ${(kj: :)DEV_REPOS}"
     "Claude session sync:csync"
     "Keep the Mac awake:nosleep sleep-manager"
   )
