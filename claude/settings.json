@@ -11,6 +11,7 @@
     ],
     "defaultMode": "auto"
   },
+  "model": "opus",
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true,
     "github@claude-plugins-official": false,
@@ -38,6 +39,5 @@
       }
     }
   },
-  "skipAutoPermissionPrompt": true,
-  "model": "opus"
+  "skipAutoPermissionPrompt": true
 }
