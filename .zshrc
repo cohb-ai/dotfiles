@@ -187,19 +187,46 @@ tpaste() {
   tmux attach-session -t "$session"
 }
 
-# _dev_session_has_claude <session> — true if any pane in the session has a live
-# `claude` child process. We deliberately do NOT use pane_current_command:
-# Claude sets its process title to its version string (e.g. "2.1.159"), so it
-# never reads as "claude"/"node" there. The pane shell's direct children are the
-# reliable signal (dev sessions launch `claude` straight off the shell), and
-# this survives whatever Claude calls itself next version.
+# _dev_session_has_claude <session> — true if a live `claude` process exists
+# ANYWHERE in the session: the pane leader itself, a direct child, or deeper.
+# We deliberately do NOT use pane_current_command: Claude sets its process title
+# to its version string (e.g. "2.1.159"), so it never reads as "claude"/"node"
+# there. `ps -o comm=` still reports "claude" (comm is the executable name, fixed
+# at exec — argv/title rewrites don't touch it), which is the reliable signal.
+#
+# Why the whole subtree and not just direct children (this was an intermittent
+# false-negative — a live, detached Claude rendering with a blank ✓):
+#   • Claude can be the pane LEADER (e.g. `exec claude`): then pgrep -P pane_pid
+#     returns only Claude's OWN children (python/caffeinate tool procs), none of
+#     which read as claude — so the old direct-children-only scan missed it.
+#   • Claude can be a GRANDCHILD (resumed / nested-shell launches), one level
+#     below the direct child the old scan stopped at.
+# The `node` hedge (Claude launched as `node`) is kept only for a DIRECT child of
+# the pane shell — a node straight off a dev pane is claude-as-node; a node buried
+# deeper is more likely an MCP server or dev tool, so we match only the
+# unambiguous `claude` name there.
 _dev_session_has_claude() {
-  local s="$1" pane_pid child comm
+  local s="$1" pane_pid kid comm
   for pane_pid in ${(f)"$(tmux list-panes -t "$s" -F '#{pane_pid}' 2>/dev/null)"}; do
-    for child in ${(f)"$(pgrep -P "$pane_pid" 2>/dev/null)"}; do
-      comm=$(ps -o comm= -p "$child" 2>/dev/null)
+    comm=$(ps -o comm= -p "$pane_pid" 2>/dev/null)
+    [[ "${comm:t}" == claude ]] && return 0
+    for kid in ${(f)"$(pgrep -P "$pane_pid" 2>/dev/null)"}; do
+      comm=$(ps -o comm= -p "$kid" 2>/dev/null)
       case "${comm:t}" in (claude|node) return 0 ;; esac
+      _dev_pid_tree_has_claude "$kid" && return 0
     done
+  done
+  return 1
+}
+
+# _dev_pid_tree_has_claude <pid> — true if <pid> or any descendant has comm
+# `claude`. Recursive deep-search helper for _dev_session_has_claude.
+_dev_pid_tree_has_claude() {
+  local pid="$1" comm kid
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null)
+  [[ "${comm:t}" == claude ]] && return 0
+  for kid in ${(f)"$(pgrep -P "$pid" 2>/dev/null)"}; do
+    _dev_pid_tree_has_claude "$kid" && return 0
   done
   return 1
 }
