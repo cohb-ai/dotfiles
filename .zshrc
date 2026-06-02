@@ -506,22 +506,32 @@ tplan() {
   fi
 }
 
-# tfind <query…> — find the Claude session that's working on something, by words.
-# Unlike the title-only picker the rest of the family uses, this searches each
-# session's title *and* every prompt you typed, ranks by relevance (then
-# recency), and fzf-pops the survivors. Pick one → it foreground-resumes there,
-# the same `cd <dir> && claude -r <sid>` landing as tpop.
-#   tfind portfolio redesign      → sessions about redesigning the portfolio tab
-#   tfind pine ema swing          → the EMA-on-pine-scripts session, etc.
+# tfind [-k] <query…> — find the Claude session working on something you describe.
+# Semantic search, not grep: a keyword pass over titles + your prompts gathers a
+# candidate pool (padded with recent sessions when your wording barely matches,
+# so divergent phrasing still gets a shot), then Sonnet reads each candidate's
+# title + opening prompts and ranks the genuinely-relevant ones, each tagged with
+# a one-line reason. The ranked shortlist drops into fzf; your pick
+# foreground-resumes there — the same `cd <dir> && claude -r <sid>` landing as
+# tpop. Falls back to plain keyword ranking if the claude CLI is unreachable.
+#   tfind redesign the portfolio tab     → the session doing that, even if it
+#                                           never used the word "redesign"
+#   tfind -k pine ema swing              → skip Sonnet, fast offline keyword rank
 # Searches every project (use tgo/tpush/tpop when you already know the dir/slot).
 tfind() {
-  [[ -n "$1" ]] || { echo "Usage: tfind <words to search for>"; return 1; }
+  local keyword=
+  [[ "$1" == "-k" || "$1" == "--keyword" ]] && { keyword=1; shift; }
+  [[ -n "$1" ]] || { echo "Usage: tfind [-k] <words describing the session>"; return 1; }
   if [[ -n $TMUX && -n $CLAUDE_CODE_SESSION_ID ]]; then
     echo "Run tfind from a plain shell — it resumes a session in the foreground." >&2
     return 1
   fi
   local row
-  row=$(_claude_sessions_fzf "" "$*") || return 1   # all projects, scored by query
+  if [[ -n $keyword ]]; then
+    row=$(_claude_sessions_fzf "" "$*") || return 1       # offline keyword rank
+  else
+    row=$(_claude_sessions_semantic "$*") || return 1     # Sonnet-reranked
+  fi
   [[ -n $row ]] || return 1
   local sid cwd
   sid=${row%%$'\t'*}
@@ -529,6 +539,126 @@ tfind() {
   [[ -d $cwd ]] || { echo "Session's directory no longer exists: $cwd"; return 1; }
   echo "Resuming claude -r ${sid[1,8]}… in $cwd"
   cd "$cwd" && claude -r "$sid"
+}
+
+# _claude_sessions_semantic <query> — fzf-pick a session by what it's ABOUT.
+# Echoes the chosen "<sid>\t<cwd>\t<display>" row (same contract as
+# _claude_sessions_fzf, so tfind handles either). Pipeline: a keyword pass builds
+# a recall-oriented candidate pool, Sonnet (via `claude -p`, run as a subprocess
+# so it bypasses the zsh claude wrapper) reranks them with reasons, and the
+# ranked rows feed fzf. Any failure — no CLI, timeout, unparseable reply — falls
+# back to keyword order so the picker always populates.
+_claude_sessions_semantic() {
+  command -v fzf     >/dev/null 2>&1 || { echo "fzf not installed (brew install fzf)" >&2; return 1; }
+  command -v python3 >/dev/null 2>&1 || { echo "python3 not found" >&2; return 1; }
+  local projects="$HOME/.claude/projects"
+  [[ -d $projects ]] || { echo "No Claude sessions at $projects" >&2; return 1; }
+  local query="$1"
+  echo "↻ Asking Sonnet which session matches \"$query\"…  (-k to skip)" >&2
+
+  python3 - "$projects" "$query" <<'PY' | fzf --delimiter=$'\t' --with-nth=3 --no-hscroll \
+        --prompt="resume claude (sonnet: $query) > " --height=60% --reverse
+import json, os, sys, glob, datetime, subprocess, re
+root, query = sys.argv[1], sys.argv[2]
+STOP = {'of','the','a','an','to','on','in','for','and','is','it','with','at'}
+qterms = [t for t in query.lower().split() if t not in STOP]
+
+# ── Scan: title + your first few prompts per session (the "about" signal). ──
+sessions = []
+for f in glob.glob(os.path.join(root, '*', '*.jsonl')):
+    sid = os.path.basename(f)[:-6]
+    cwd = title = ctitle = None
+    prompts = []
+    try:
+        for line in open(f, errors='ignore'):
+            if cwd is None and '"cwd"' in line:
+                try: cwd = json.loads(line).get('cwd')
+                except ValueError: pass
+            if '"custom-title"' in line:
+                try:
+                    t = json.loads(line).get('customTitle')
+                    if t: ctitle = t
+                except ValueError: pass
+            if '"ai-title"' in line:
+                try:
+                    t = json.loads(line).get('aiTitle')
+                    if t: title = t
+                except ValueError: pass
+            if len(prompts) < 6 and '"type":"user"' in line:
+                try:
+                    c = json.loads(line).get('message', {}).get('content')
+                    txt = c if isinstance(c, str) else (
+                        ' '.join(x.get('text', '') for x in c if isinstance(x, dict))
+                        if isinstance(c, list) else '')
+                    txt = txt.strip()
+                    if txt and not txt.startswith('<'): prompts.append(txt)
+                except ValueError: pass
+    except OSError:
+        continue
+    head = ctitle or title or (prompts[0] if prompts else '') or '(no message)'
+    sessions.append({'sid': sid, 'cwd': cwd or '?', 'mtime': os.path.getmtime(f),
+                     'head': head, 'prompts': prompts})
+
+# ── Retrieve: keyword pass for recall. Pad thin matches with recent sessions
+# so a query whose words diverge from the transcript still reaches the model. ──
+def kw(s):
+    head = s['head'].lower(); body = ' '.join(s['prompts']).lower()
+    return sum(body.count(t) + 4 * head.count(t) for t in qterms)
+for s in sessions: s['kw'] = kw(s)
+cands = sorted((s for s in sessions if s['kw'] > 0),
+               key=lambda s: (s['kw'], s['mtime']), reverse=True)[:30]
+if len(cands) < 8:
+    have = {s['sid'] for s in cands}
+    for s in sorted(sessions, key=lambda s: s['mtime'], reverse=True):
+        if s['sid'] not in have: cands.append(s)
+        if len(cands) >= 20: break
+
+def emit(rows):                                       # rows: (session, reason)
+    for s, why in rows:
+        when = datetime.datetime.fromtimestamp(s['mtime']).strftime('%m-%d %H:%M')
+        short = os.path.basename(s['cwd']) if s['cwd'] != '?' else '?'
+        disp = f"{when}  {short:<16}  {' '.join(s['head'].split())[:60]}"
+        if why: disp += f"   ⟵ {why}"
+        print(f"{s['sid']}\t{s['cwd']}\t{disp}")
+
+if not cands:
+    sys.exit(0)
+
+# ── Rerank: hand Sonnet the candidates' context + the query, get a ranking. ──
+def digest(i, s):
+    when = datetime.datetime.fromtimestamp(s['mtime']).strftime('%Y-%m-%d')
+    ps = ' / '.join(p[:200] for p in s['prompts'][:4])
+    return f"[{i}] ({when}, {os.path.basename(s['cwd'])}) {s['head'][:120]}\n    {ps[:600]}"
+
+prompt = (
+    f'I am looking for a past coding session — the one working on:\n"{query}"\n\n'
+    f'Candidate sessions, each with its title and my opening prompts:\n\n'
+    + '\n'.join(digest(i, s) for i, s in enumerate(cands))
+    + '\n\nReturn ONLY a JSON array (no prose, no code fence) of the genuinely '
+      'relevant sessions, best match first, at most 8, each {"i": <index>, '
+      '"why": "<reason in 8 words or fewer>"}. If none fit, return [].')
+
+order = None
+try:
+    p = subprocess.run(['claude', '-p', '--model', 'sonnet', '--output-format', 'json'],
+                       input=prompt, capture_output=True, text=True, timeout=60)
+    res = json.loads(p.stdout).get('result', '')
+    m = re.search(r'\[.*\]', res, re.S)               # tolerate stray prose/fences
+    if m: order = json.loads(m.group(0))
+except Exception:
+    order = None
+
+if order:                                             # Sonnet's ranking, with reasons
+    rows = []
+    for o in order:
+        try: i = int(o['i'])
+        except (KeyError, ValueError, TypeError): continue
+        if 0 <= i < len(cands):
+            rows.append((cands[i], str(o.get('why', '')).strip()))
+    if rows:
+        emit(rows); sys.exit(0)
+emit([(s, '') for s in cands])                        # fallback: keyword order
+PY
 }
 
 # _claude_sessions_fzf [cwd] [query] — fzf-pick a saved Claude transcript.
