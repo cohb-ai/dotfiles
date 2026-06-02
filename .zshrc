@@ -412,44 +412,41 @@ tread() {
     | less -R +G
 }
 
-# tplan [pattern] — fzf-pick and render a Claude plan as markdown
-# tplan           → pick from all plans, newest first
-# tplan ally      → filter to plans whose filename contains "ally"
+# tplan [--all] — render the plan a Claude session wrote, picked by session
+#   • Run from INSIDE Claude (CLAUDE_CODE_SESSION_ID set): renders THIS
+#     session's plan automatically.
+#   • Run from a plain shell: fzf-pick a session (scoped to $PWD's sessions;
+#     pass --all to list every project), then render its plan.
+# Sessions name their plan by an absolute ~/.claude/plans/<slug>.md path in the
+# transcript; we grab the LAST one referenced (the plan as finally written).
+# glow renders + word-wraps for narrow mobile terminals; falls back to less.
 tplan() {
-  local plandir="$HOME/.claude/plans"
-  local pattern="${1:-}"
+  local all=
+  [[ "$1" == "--all" || "$1" == "-a" ]] && all=1
 
-  if [[ ! -d "$plandir" ]]; then
-    echo "No plans directory: $plandir" >&2
-    return 1
-  fi
-
-  # Collect .md files newest-first; filter by pattern when given
-  local -a files
-  files=("${(@f)$(ls -t "$plandir"/*.md 2>/dev/null)}")
-  if [[ -n "$pattern" ]]; then
-    files=("${(@M)files:#*${pattern}*}")
-  fi
-
-  if [[ ${#files[@]} -eq 0 ]]; then
-    echo "No plans found${pattern:+ matching '$pattern'}" >&2
-    return 1
-  fi
-
-  local chosen
-  if [[ ${#files[@]} -eq 1 ]]; then
-    chosen="${files[1]}"
+  local sid
+  if [[ -n $CLAUDE_CODE_SESSION_ID && -z $all ]]; then
+    sid=$CLAUDE_CODE_SESSION_ID                    # current-session mode
   else
-    chosen=$(printf '%s\n' "${files[@]}" | sed 's|.*/||; s|\.md$||' \
-      | fzf --prompt="plan> " --height=~12 --no-sort)
-    [[ -z "$chosen" ]] && return 0
-    chosen="$plandir/$chosen.md"
+    local row filter="$PWD"
+    [[ -n $all ]] && filter=""                     # --all: every project
+    row=$(_claude_sessions_fzf "$filter") || return 1
+    [[ -n $row ]] || return 1
+    sid=${row%%$'\t'*}
   fi
+
+  local transcript=("$HOME"/.claude/projects/*/"$sid".jsonl(N))
+  [[ -n $transcript ]] || { echo "No transcript found for session $sid" >&2; return 1; }
+
+  # Last plan path referenced in the transcript — the plan as finally written.
+  local plan
+  plan=$(grep -ho "$HOME/.claude/plans/[^\"]*\.md" "$transcript[1]" 2>/dev/null | tail -1)
+  [[ -n $plan && -f $plan ]] || { echo "This session has no saved plan." >&2; return 1; }
 
   if command -v glow &>/dev/null; then
-    glow -p "$chosen"
+    glow -p "$plan"
   else
-    less "$chosen"
+    less "$plan"
   fi
 }
 
