@@ -8,6 +8,7 @@ Personal shell config and utility scripts.
   `help` for a live, auto-generated list of every command defined here.
 - `bin/` — utility scripts (added to PATH)
   - `sleep-manager` — manage macOS sleep behavior (`status`, `disable`, `enable`)
+  - `pii-scan` — fail if any PII appears in tracked/staged files (see **PII guard** below)
 - `Brewfile` — third-party CLI tools the config depends on (`gh`, `jq`, `tmux`);
   installed by `install.sh` via `brew bundle`
 - `claude/` — Claude Code config
@@ -43,6 +44,40 @@ MCP is two separate things:
 - **Local/stdio MCP servers** live inside `~/.claude.json`, which is a stateful file
   (OAuth tokens, project history, caches) and is **not** symlinked. We have none today.
   If you add one, sync it with a merge step rather than committing `~/.claude.json`.
+
+## PII guard
+
+`pii-scan` keeps personal data out of this public repo. It reuses the cashfwd
+two-layer ruleset plus a dotfiles-specific allowlist:
+
+1. **Denylist** — `scrub-rules.json`, the literal list of real personal
+   identifiers (names, emails, phones, account numbers, private hosts). It is
+   **private and never committed here** (gitignored). Locally it's read from
+   `~/code/cashfwd-private/scrub-rules.json` (override with `$PII_RULES`); in CI
+   it comes from the `PII_SCRUB_RULES` secret.
+2. **Ignore patterns** — `pii-ignore-patterns.txt`, regexes for known
+   false-positive *shapes* (no PII; tracked).
+3. **Allowlist** — `pii-allowlist.txt`, values that are intentionally public in
+   *this* repo (your GitHub handle, generic vendor names like `Anthropic`). A
+   denylist hit clears only when an allowlist entry actually appears on the same
+   line. Don't edit the shared denylist to silence a dotfiles false positive —
+   add it here instead.
+
+It runs two ways, both wired up by `install.sh`:
+
+- **Pre-commit hook** (`.githooks/pre-commit`) — scans staged content before
+  every commit. Enabled via `git config core.hooksPath .githooks` (repo-local,
+  set by `install.sh`). It **fails open** when the denylist is absent — a machine
+  without `cashfwd-private` can still commit; CI is the backstop. Bypass once
+  with `git commit --no-verify`.
+- **GitHub Action** (`.github/workflows/pii-scan.yml`) — runs on push/PR to
+  `main` and **fails closed**, so a missing secret is loud. Set the secret once:
+
+  ```sh
+  gh secret set PII_SCRUB_RULES < ~/code/cashfwd-private/scrub-rules.json
+  ```
+
+Run it by hand anytime: `pii-scan` (all tracked files) or `pii-scan --staged`.
 
 ## Install on a new machine
 
