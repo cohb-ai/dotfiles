@@ -986,6 +986,127 @@ tpop() {
   cd "$dir" && claude -r "$sid"
 }
 
+# _tbeam_sync_transcript <cwd> <host> — copy a session's transcript dir to <host>
+# before it's resumed there. The conversation lives in
+# ~/.claude/projects/<cwd-with-slashes-as-dashes>/, and `claude -r <sid>` on the
+# far side can only resume what's already on its disk — so the bytes must land
+# first. csync/iCloud is the background convergence path; this is the immediate,
+# deterministic push for "beam it *now*".
+#
+# Conflict policy (the one real knob): rsync --update, no --delete. Newer mtime
+# wins per file, nothing is removed. The machine you're beaming FROM holds the
+# live, freshest copy, so it wins — but if the host somehow had a newer copy
+# (you'd worked there more recently) it's preserved rather than clobbered.
+_tbeam_sync_transcript() {
+  local cwd="$1" host="$2"
+  local enc="${cwd//\//-}"                       # /a/b → -a-b, Claude's dir scheme
+  local src="$HOME/.claude/projects/$enc/"
+  [[ -d $src ]] || { echo "tbeam: no transcript dir for $cwd ($src)" >&2; return 1; }
+  rsync -az --update --exclude='.DS_Store' -e ssh "$src" "$host:.claude/projects/$enc/"
+}
+
+# _tbeam_land — runs ON the destination host. It's defined in the shared dotfiles
+# (so it exists on every machine); the laptop invokes it over ssh with the work
+# passed in the environment: TB_CWD, TB_SID, TB_MODE (tmux|fg), TB_ATTACH.
+# tmux mode reuses the host's own _dev_resume_session, so what lands is a
+# first-class dev-<repo>-<slot> that tgo/tread/tpop already understand. fg mode
+# just resumes the conversation in this ssh session's foreground.
+_tbeam_land() {
+  cd "$TB_CWD" 2>/dev/null || { echo "tbeam: $TB_CWD not found on ${HOST:-this host}" >&2; return 1; }
+  if [[ "$TB_MODE" == fg ]]; then
+    exec claude -r "$TB_SID"                     # owns this ssh TTY; dies with it
+  fi
+  local repo slot session
+  read -r repo slot < <(_dev_slot_for_cwd "$TB_CWD")
+  [[ -n $repo && -n $slot ]] || { echo "tbeam: couldn't map $TB_CWD to a dev slot" >&2; return 1; }
+  session="dev-${repo}-${slot}"
+  _dev_resume_session "$session" "$TB_CWD" "$TB_SID"
+  if [[ -n $TB_ATTACH ]]; then
+    exec tmux attach -t "$session"              # drop the ssh caller straight in
+  fi
+  print -r -- "$session"                        # last line: caller reads it for the hint
+}
+
+# tbeam [-f|--fg] [-d|--detach] [-p|--pick] [-a|--all] [host] — teleport a Claude
+# session to another machine (default: the mac mini) and resume it there.
+# Like tpush, but the session lands on <host> instead of local tmux:
+#   • From INSIDE Claude: grabs THIS conversation + $PWD (always detaches — a
+#     Bash subprocess has no TTY to ssh -t into; you get an attach hint instead).
+#   • From a plain shell: fzf-pick a session (scoped to $PWD; -a for every repo).
+# Default landing is a detached dev-<repo>-<slot> tmux session on <host>, then it
+# ssh's you straight in. Flags:
+#   -f/--fg      resume in the ssh foreground instead of tmux (dies if ssh drops)
+#   -d/--detach  leave it running on <host>, just print how to attach (no ssh -t)
+#   -p/--pick    force the picker even when a current session is detectable
+#   -a/--all     picker across every project
+# The session's repo must exist at the same path on <host> (yours all live in
+# ~/code on every machine); the transcript is rsync'd over before it resumes.
+tbeam() {
+  local fg= detach= pick= all= host= a
+  for a in "$@"; do
+    case "$a" in
+      -f|--fg)     fg=1 ;;
+      -d|--detach) detach=1 ;;
+      -p|--pick)   pick=1 ;;
+      -a|--all)    pick=1; all=1 ;;
+      -*)          echo "tbeam: unknown flag $a" >&2; return 1 ;;
+      *)           host="$a" ;;
+    esac
+  done
+  host="${host:-mini}"
+  command -v rsync >/dev/null 2>&1 || { echo "tbeam: rsync not found" >&2; return 1; }
+
+  # Resolve the session id + its working dir (mirrors tpush).
+  local sid cwd
+  if [[ -n $CLAUDE_CODE_SESSION_ID && -z $pick ]]; then
+    sid=$CLAUDE_CODE_SESSION_ID; cwd=$PWD          # current-session mode
+    detach=1                                        # no TTY in here to ssh -t into
+  else
+    local row filter="$PWD"
+    [[ -n $all ]] && filter=""                      # --all: every project
+    row=$(_claude_sessions_fzf "$filter") || return 1
+    [[ -n $row ]] || return 1
+    sid=${row%%$'\t'*}
+    cwd=${${row#*$'\t'}%%$'\t'*}
+  fi
+  [[ -d $cwd ]] || { echo "tbeam: session's directory no longer exists: $cwd" >&2; return 1; }
+
+  # The far side resumes by cd'ing into the same path — bail early if it's absent.
+  if ! ssh "$host" "test -d ${(q)cwd}" 2>/dev/null; then
+    echo "tbeam: $cwd doesn't exist on $host — clone/sync the repo there first." >&2
+    return 1
+  fi
+
+  echo "⟳ Beaming ${sid[1,8]}… ($cwd) → $host"
+  _tbeam_sync_transcript "$cwd" "$host" || return 1
+
+  # Foreground mode: resume straight in the ssh session (needs a real terminal).
+  if [[ -n $fg ]]; then
+    [[ -z $detach ]] || { echo "tbeam: -f needs a terminal; can't combine with -d / inside Claude." >&2; return 1; }
+    ssh -t "$host" "TB_CWD=${(q)cwd} TB_SID=${(q)sid} TB_MODE=fg zsh -lic _tbeam_land"
+    return
+  fi
+
+  # tmux mode + auto-attach: -t lets _tbeam_land exec us into the landed session.
+  if [[ -z $detach ]]; then
+    ssh -t "$host" "TB_CWD=${(q)cwd} TB_SID=${(q)sid} TB_MODE=tmux TB_ATTACH=1 zsh -lic _tbeam_land"
+    return
+  fi
+
+  # tmux mode, detached: capture the landed session name, print an attach hint.
+  local session
+  session=$(ssh "$host" "TB_CWD=${(q)cwd} TB_SID=${(q)sid} TB_MODE=tmux zsh -lic _tbeam_land" | tail -1)
+  [[ -n $session ]] || { echo "tbeam: landing on $host failed." >&2; return 1; }
+  echo "✓ Running on $host as $session"
+  local rest=${session#dev-} repo slot
+  slot=${rest##*-}; repo=${rest%-*}
+  if [[ -n "${DEV_REPOS[$repo]}" ]]; then
+    echo "  Attach: ssh $host -t \"zsh -lic 'tgo $repo $slot'\"    (or ssh $host, then: tgo $repo $slot)"
+  else
+    echo "  Attach: ssh $host -t \"zsh -lic 'tmux attach -t $session'\""
+  fi
+}
+
 # help — show this command list, grouped by purpose
 # Each command's name + description are parsed live from the leading
 # `# name … — description` comment above each ~/.zshrc function and the header
@@ -1034,7 +1155,7 @@ help() {
   local -a groups=(
     "Dotfiles & shell:dots help"
     "Git & PRs:prview"
-    "Claude dev sessions (tmux):dev dev-list tgo tread tpaste tpush tpop tplan tfind ${(kj: :)DEV_REPOS}"
+    "Claude dev sessions (tmux):dev dev-list tgo tread tpaste tpush tpop tbeam tplan tfind ${(kj: :)DEV_REPOS}"
     "Claude session sync:csync"
     "Keep the Mac awake:nosleep sleep-manager"
   )
@@ -1088,6 +1209,8 @@ help() {
 _ff_repos()     { _arguments '1:repo:(ff cfp cf)' '2:slot:(1 2 3 4)' }
 _dev_repos()    { _arguments '1:repo:(ff cfp cf)' '2:slot:(1 2 3 4)' '*:flag:(--no-tmux)' }
 _sleepmgr_cmd() { _arguments '1:command:(status disable enable help)' }
+_tbeam_args()   { _arguments '*:option:(-f --fg -d --detach -p --pick -a --all mini)' }
 compdef _dev_repos    dev
 compdef _ff_repos     tgo tpaste tread tplan tpop
+compdef _tbeam_args   tbeam
 compdef _sleepmgr_cmd sleep-manager
