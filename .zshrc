@@ -545,7 +545,14 @@ _dev_new_session() {
   local logfile="$HOME/.tmux-logs/${session}.log"
   local sid; sid="$(uuidgen | tr 'A-Z' 'a-z')"
   mkdir -p "$HOME/.tmux-logs"
-  tmux new-session -d -s "$session" -c "$dir" -x 220 -y 50
+  # No fixed -x/-y geometry: a session seeded oversized (was 220x50) stays bigger
+  # than a narrow client until it resizes, so attaching from a phone (Termius)
+  # showed tmux's status-right pan indicator ([x,y], reads like "20") and the UI
+  # overflowed the screen. window-size latest makes the window track whichever
+  # client is active, so it fits the phone on attach. (latest is tmux's default,
+  # but we set it explicitly so it holds on machines with a different default.)
+  tmux new-session -d -s "$session" -c "$dir"
+  tmux set-option -t "$session" window-size latest 2>/dev/null
   tmux pipe-pane -t "$session" -o "cat >> $logfile"
   tmux set-environment -t "$session" CLAUDE_RESUME_ID "$sid"
   tmux send-keys -t "$session" "git stash; git fetch origin; git checkout $branch 2>/dev/null || git checkout -b $branch; git pull origin $branch; claude --session-id $sid" Enter
@@ -1042,7 +1049,10 @@ _dev_resume_session() {
   local session="$1" dir="$2" sid="$3"
   local logfile="$HOME/.tmux-logs/${session}.log"
   mkdir -p "$HOME/.tmux-logs"
-  tmux new-session -d -s "$session" -c "$dir" -x 220 -y 50
+  # No fixed geometry / window-size latest: fit the active client so attaching from
+  # a phone doesn't pan a too-wide window (see _dev_new_session for the full why).
+  tmux new-session -d -s "$session" -c "$dir"
+  tmux set-option -t "$session" window-size latest 2>/dev/null
   tmux pipe-pane -t "$session" -o "cat >> $logfile"
   # Record the resumed id on the session so `tpop` can pull the exact same
   # conversation back to the foreground (it also falls back to the dir's newest
