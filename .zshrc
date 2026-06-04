@@ -269,13 +269,41 @@ _dev_session_at_welcome() {
   tmux capture-pane -t "$1" -p 2>/dev/null | grep -q 'Welcome back'
 }
 
+# _dev_session_claude_pid <session> — print the pid of the live `claude` in the
+# session (first match, same subtree scan as _dev_session_has_claude), or nothing.
+# Used to map OLD sessions (no CLAUDE_RESUME_ID) to their transcript by start time.
+_dev_session_claude_pid() {
+  local s="$1" pane_pid kid comm found
+  for pane_pid in ${(f)"$(tmux list-panes -t "$s" -F '#{pane_pid}' 2>/dev/null)"}; do
+    comm=$(ps -o comm= -p "$pane_pid" 2>/dev/null)
+    [[ "${comm:t}" == claude ]] && { print -r -- "$pane_pid"; return 0; }
+    for kid in ${(f)"$(pgrep -P "$pane_pid" 2>/dev/null)"}; do
+      found=$(_dev_pid_tree_claude_pid "$kid") && { print -r -- "$found"; return 0; }
+    done
+  done
+  return 1
+}
+# _dev_pid_tree_claude_pid <pid> — print first pid in the subtree whose comm is
+# `claude` (companion to _dev_pid_tree_has_claude, but returns the pid).
+_dev_pid_tree_claude_pid() {
+  local pid="$1" comm kid found
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null)
+  [[ "${comm:t}" == claude ]] && { print -r -- "$pid"; return 0; }
+  for kid in ${(f)"$(pgrep -P "$pid" 2>/dev/null)"}; do
+    found=$(_dev_pid_tree_claude_pid "$kid") && { print -r -- "$found"; return 0; }
+  done
+  return 1
+}
+
 # _dev_session_summary <session> <dir> — one-line "what it's working on" for a
 # dev session: the title of its Claude transcript — customTitle (set by /rename),
 # else the auto-generated aiTitle, else the first user prompt. Resolves the
 # transcript by the id stashed on the session (CLAUDE_RESUME_ID, set by both
-# _dev_new_session and _dev_resume_session), falling back to the dir's newest
-# transcript for older sessions started before that — the same resolution
-# tplan/tpop use. Prints nothing if no transcript/title is found.
+# _dev_new_session and _dev_resume_session). For OLD sessions with no stashed id
+# it matches the live claude's start time to a transcript's birthtime (see below)
+# rather than blindly taking the dir's newest — that newest-fallback gave sibling
+# slots in one repo identical summaries (the dev-dot-2/dot-3 duplicate bug).
+# Prints nothing if no transcript/title is found.
 _dev_session_summary() {
   # null_glob: an unmatched transcript glob expands to nothing instead of
   # erroring; bare_glob_qual: keep the (Nom[1]) qualifiers parsing even in a
@@ -287,7 +315,29 @@ _dev_session_summary() {
   if [[ -n $sid ]]; then
     tx=( "$HOME/.claude/projects"/*/"$sid".jsonl(N) )
   else
-    tx=( "$HOME/.claude/projects/${dir//\//-}"/*.jsonl(Nom[1]) )
+    # No recorded sid: the dir's newest transcript is WRONG when two live claudes
+    # share a repo — both resolve to it and show identical summaries. Each `claude`
+    # creates its transcript within seconds of launching, so disambiguate by the
+    # live claude's start time: pick the dir transcript whose birthtime is closest
+    # to (and at/after) that start. Falls back to newest-by-mtime if the pid or
+    # birthtimes can't be read.
+    local proj="$HOME/.claude/projects/${dir//\//-}" cpid start
+    cpid=$(_dev_session_claude_pid "$session")
+    if [[ -n $cpid ]]; then
+      start=$(ps -o lstart= -p "$cpid" 2>/dev/null)
+      start=$(date -j -f '%a %b %d %T %Y' "${start## #}" +%s 2>/dev/null)
+    fi
+    if [[ -n $start ]]; then
+      local f b best bestdiff diff
+      for f in "$proj"/*.jsonl(N); do
+        b=$(stat -f %B "$f" 2>/dev/null) || continue
+        (( b < start - 2 )) && continue              # born before this claude → not ours
+        diff=$(( b - start ))
+        if [[ -z $bestdiff ]] || (( diff < bestdiff )); then bestdiff=$diff; best=$f; fi
+      done
+      [[ -n $best ]] && tx=( "$best" )
+    fi
+    [[ -n ${tx[1]} ]] || tx=( "$proj"/*.jsonl(Nom[1]) )   # fallback: newest by mtime
   fi
   [[ -n ${tx[1]} ]] || return 0
   python3 - "${tx[1]}" <<'PY'
@@ -320,15 +370,18 @@ print(' '.join((ctitle or title or msg or '').split())[:50])
 PY
 }
 
-# _dev_list — print every dev-<repo>-<slot> tmux session on two axes plus a
-# summary of what it's working on:
+# _dev_list — print every dev-<repo>-<slot> tmux session, compact enough to read
+# on a phone (Termius). One line per session: two status glyphs + short name +
+# what it's working on. The `dev-` prefix and the redundant "attached/detached"
+# word are dropped (the glyph already says it) and the full repo path is dropped
+# (it's in the name) so the line fits a narrow screen; the summary is truncated to
+# $COLUMNS so it never wraps. Glyphs:
 #   ● attached / ○ detached   (any client viewing it)
-#   ✓ active context          (a live claude process in the session = Claude
-#                              alive with its conversation loaded; blank once it
-#                              exits to a shell). Independent of attach state: a
-#                              detached session can still hold a live Claude.
-#   summary                   the session's Claude title (see _dev_session_summary);
-#                              "(no active session)" once Claude has exited.
+#   ✓ active context          a live claude that has actually loaded a conversation.
+#                             Blank for: a claude parked on its startup splash
+#                             (_dev_session_at_welcome — "idle, no conversation"),
+#                             and for a session that's exited to a shell ("no active
+#                             session"). Independent of attach state.
 # Shared by `dev list` and bare `tgo`.
 _dev_list() {
   local names
@@ -339,22 +392,31 @@ _dev_list() {
   fi
   local g c y r0=
   if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; r0=$'\e[0m'; fi
-  print -r -- "dev sessions  (● attached · ✓ Claude has active context)"
-  local s state dir amark cmark summary
+  # widest short name (sans dev-) so the WORKING ON column lines up
+  local s short name_w=7
+  while IFS= read -r s; do short="${s#dev-}"; (( ${#short} > name_w )) && name_w=${#short}; done <<< "$names"
+  local avail=$(( ${COLUMNS:-80} - 6 - name_w ))
+  (( avail < 12 )) && avail=$(( 80 - 6 - name_w ))
+  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context"
+  print -r -- ""
+  printf '  %s%-*s %s%s\n' "$y" $((3 + name_w)) 'SESSION' 'WORKING ON' "$r0"
+  local state dir amark cmark summary
   while IFS= read -r s; do
+    short="${s#dev-}"
     state=$(tmux display-message -p -t "$s" '#{?session_attached,attached,detached}' 2>/dev/null)
     dir=$(tmux display-message -p -t "$s" '#{session_path}' 2>/dev/null)
     if [[ $state == attached ]]; then amark="${g}●${r0}"; else amark='○'; fi
-    if _dev_session_has_claude "$s"; then
+    if ! _dev_session_has_claude "$s"; then
+      cmark=' '; summary='(no active session)'
+    elif _dev_session_at_welcome "$s"; then
+      cmark=' '; summary='(idle — no conversation)'
+    else
       cmark="${c}✓${r0}"
       summary=$(_dev_session_summary "$s" "$dir")
       [[ -n $summary ]] || summary='(untitled session)'
-    else
-      cmark=' '
-      summary='(no active session)'
     fi
-    printf '  %s %s %-13s %-9s %-16s %s\n' \
-      "$amark" "$cmark" "$s" "$state" "${dir/#$HOME/~}" "${y}${summary}${r0}"
+    (( ${#summary} > avail )) && summary="${summary[1,avail-1]}…"
+    printf '  %s%s %-*s %s%s%s\n' "$amark" "$cmark" $name_w "$short" "$y" "$summary" "$r0"
   done <<< "$names"
 }
 
