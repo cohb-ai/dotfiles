@@ -39,16 +39,17 @@ prview() {
 # nosleep — keep the Mac awake until Ctrl-C (interactive; sleep-manager for background)
 nosleep() { trap 'sudo pmset -a disablesleep 0' EXIT INT; sudo pmset -a disablesleep 1 && caffeinate -dimsu; }
 
-# dots — fetch origin's main HEAD and reload zsh; fast-forward only, and only on main
+# dots — fetch origin's main HEAD and reload zsh. Fast-forwards whatever branch
+# we're on to origin/main — true on main, and on a dev branch (dev/claude-1) that
+# sits at/behind main, which is the normal state under the dev workflow. --ff-only
+# makes this safe: if the branch has its own commits ahead, or local edits would
+# be overwritten, the merge aborts untouched and we just reload.
 dots() {
   cd ~/code/dotfiles || return
   git fetch origin main || { cd - > /dev/null; return 1; }
   local branch=$(git symbolic-ref --short -q HEAD)
-  if [[ "$branch" == main ]]; then
-    git merge --ff-only origin/main || print -u2 "dots: main has diverged from origin; not fast-forwarding"
-  else
-    print "dots: on '$branch', fetched origin/main but not merging (switch to main to fast-forward)"
-  fi
+  git merge --ff-only origin/main 2>/dev/null \
+    || print -u2 "dots: couldn't fast-forward '$branch' to origin/main (ahead/diverged or local edits) — reloaded only"
   source ~/.zshrc
   cd - > /dev/null
 }
