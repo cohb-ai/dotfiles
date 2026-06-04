@@ -39,8 +39,8 @@ prview() {
 # nosleep — keep the Mac awake until Ctrl-C (interactive; sleep-manager for background)
 nosleep() { trap 'sudo pmset -a disablesleep 0' EXIT INT; sudo pmset -a disablesleep 1 && caffeinate -dimsu; }
 
-# dots — pull latest dotfiles and reload zsh
-dots() { cd ~/code/dotfiles && git pull && source ~/.zshrc && cd - > /dev/null; }
+# dots — pull latest dotfiles (origin's main HEAD) and reload zsh
+dots() { cd ~/code/dotfiles && git pull origin main && source ~/.zshrc && cd - > /dev/null; }
 
 # DEV_REPOS — single source of truth for the repos `dev` and the cd shortcuts
 # below both understand. Add a repo here and it gains a `dev <key>` session AND a
