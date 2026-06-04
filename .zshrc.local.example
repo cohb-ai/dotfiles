@@ -8,6 +8,10 @@
 DEV_REPOS[api]="$HOME/code/my-api"
 DEV_REPOS[web]="$HOME/code/my-web"
 
+# Branch `dev` checks out (and creates) for a fresh Claude session.
+# Defaults to dev/claude-1 in ~/.zshrc; uncomment to use your own.
+# DEV_BRANCH=dev/agent
+
 # Default host for `tbeam` (teleport a Claude session to another machine).
 # Omit this to require an explicit host argument every time.
 # export TBEAM_HOST=my-remote

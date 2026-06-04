@@ -51,6 +51,11 @@ dots() { cd ~/code/dotfiles && git pull origin main && source ~/.zshrc && cd - >
 typeset -gA DEV_REPOS
 [[ -f "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"
 
+# DEV_BRANCH — the branch `dev`/`_dev_new_session` check out (and create) when
+# starting a fresh Claude session. Override in ~/.zshrc.local; defaults here so
+# the committed config works standalone. `:=` lets the local file win if it set it.
+: ${DEV_BRANCH:=dev/claude-1}
+
 # Generate a cd shortcut per repo: each key jumps straight to its dir.
 for _repo in ${(k)DEV_REPOS}; do
   alias "$_repo"="cd ${DEV_REPOS[$_repo]}"
@@ -229,12 +234,65 @@ _dev_pid_tree_has_claude() {
   return 1
 }
 
-# _dev_list — print every dev-<repo>-<slot> tmux session on two axes:
+# _dev_session_summary <session> <dir> — one-line "what it's working on" for a
+# dev session: the title of its Claude transcript — customTitle (set by /rename),
+# else the auto-generated aiTitle, else the first user prompt. Resolves the
+# transcript by the resumed id stashed on the session (CLAUDE_RESUME_ID, set by
+# _dev_resume_session), falling back to the dir's newest transcript — the same
+# resolution tplan/tpop use. Prints nothing if no transcript/title is found.
+_dev_session_summary() {
+  # null_glob: an unmatched transcript glob expands to nothing instead of
+  # erroring; bare_glob_qual: keep the (Nom[1]) qualifiers parsing even in a
+  # shell that disabled them. local_options scopes both to this function.
+  setopt local_options null_glob bare_glob_qual
+  local session="$1" dir="$2" sid
+  sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
+  local -a tx
+  if [[ -n $sid ]]; then
+    tx=( "$HOME/.claude/projects"/*/"$sid".jsonl(N) )
+  else
+    tx=( "$HOME/.claude/projects/${dir//\//-}"/*.jsonl(Nom[1]) )
+  fi
+  [[ -n ${tx[1]} ]] || return 0
+  python3 - "${tx[1]}" <<'PY'
+import json, sys
+title = ctitle = msg = None
+try:
+    for line in open(sys.argv[1], errors='ignore'):
+        if '"custom-title"' in line:                    # /rename — wins
+            try:
+                t = json.loads(line).get('customTitle')
+                if t: ctitle = t                        # keep the most recent
+            except ValueError: pass
+        if '"ai-title"' in line:
+            try:
+                t = json.loads(line).get('aiTitle')
+                if t: title = t                         # keep the most recent
+            except ValueError: pass
+        if msg is None and '"type":"user"' in line:     # first real prompt
+            try:
+                c = json.loads(line).get('message', {}).get('content')
+                txt = c if isinstance(c, str) else (
+                    ' '.join(x.get('text', '') for x in c if isinstance(x, dict))
+                    if isinstance(c, list) else '')
+                txt = txt.strip()
+                if txt and not txt.startswith('<'): msg = txt
+            except ValueError: pass
+except OSError:
+    pass
+print(' '.join((ctitle or title or msg or '').split())[:50])
+PY
+}
+
+# _dev_list — print every dev-<repo>-<slot> tmux session on two axes plus a
+# summary of what it's working on:
 #   ● attached / ○ detached   (any client viewing it)
 #   ✓ active context          (a live claude process in the session = Claude
 #                              alive with its conversation loaded; blank once it
 #                              exits to a shell). Independent of attach state: a
 #                              detached session can still hold a live Claude.
+#   summary                   the session's Claude title (see _dev_session_summary);
+#                              "(no active session)" once Claude has exited.
 # Shared by `dev list` and bare `tgo`.
 _dev_list() {
   local names
@@ -243,16 +301,24 @@ _dev_list() {
     echo "No dev sessions running."
     return 0
   fi
-  local g c r0=
-  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; r0=$'\e[0m'; fi
+  local g c y r0=
+  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; r0=$'\e[0m'; fi
   print -r -- "dev sessions  (● attached · ✓ Claude has active context)"
-  local s state dir amark cmark
+  local s state dir amark cmark summary
   while IFS= read -r s; do
     state=$(tmux display-message -p -t "$s" '#{?session_attached,attached,detached}' 2>/dev/null)
     dir=$(tmux display-message -p -t "$s" '#{session_path}' 2>/dev/null)
     if [[ $state == attached ]]; then amark="${g}●${r0}"; else amark='○'; fi
-    if _dev_session_has_claude "$s"; then cmark="${c}✓${r0}"; else cmark=' '; fi
-    printf '  %s %s %-13s %-9s %s\n' "$amark" "$cmark" "$s" "$state" "${dir/#$HOME/~}"
+    if _dev_session_has_claude "$s"; then
+      cmark="${c}✓${r0}"
+      summary=$(_dev_session_summary "$s" "$dir")
+      [[ -n $summary ]] || summary='(untitled session)'
+    else
+      cmark=' '
+      summary='(no active session)'
+    fi
+    printf '  %s %s %-13s %-9s %-16s %s\n' \
+      "$amark" "$cmark" "$s" "$state" "${dir/#$HOME/~}" "${y}${summary}${r0}"
   done <<< "$names"
 }
 
@@ -302,16 +368,17 @@ tgo() {
 }
 
 # _dev_new_session <session> <dir> — create a detached tmux session in <dir>,
-# start logging, and launch Claude on the dev/claude-1 branch. Shared by `dev`
-# and `tpaste` so the bootstrap (branch dance, geometry, logging) lives in one
-# place; callers attach (or not) and deliver input themselves afterwards.
+# start logging, and launch Claude on the $DEV_BRANCH branch (default
+# dev/claude-1). Shared by `dev` and `tpaste` so the bootstrap (branch dance,
+# geometry, logging) lives in one place; callers attach (or not) and deliver
+# input themselves afterwards.
 _dev_new_session() {
   local session="$1" dir="$2"
   local logfile="$HOME/.tmux-logs/${session}.log"
   mkdir -p "$HOME/.tmux-logs"
   tmux new-session -d -s "$session" -c "$dir" -x 220 -y 50
   tmux pipe-pane -t "$session" -o "cat >> $logfile"
-  tmux send-keys -t "$session" "git stash; git fetch origin; git checkout dev/claude-1 2>/dev/null || git checkout -b dev/claude-1; git pull origin dev/claude-1; claude" Enter
+  tmux send-keys -t "$session" "git stash; git fetch origin; git checkout $DEV_BRANCH 2>/dev/null || git checkout -b $DEV_BRANCH; git pull origin $DEV_BRANCH; claude" Enter
 }
 
 # dev <repo> [slot] [--no-tmux] — open/reattach a Claude Code tmux session
@@ -365,7 +432,7 @@ dev() {
   if [[ -n "$no_tmux" ]]; then
     echo "Starting claude in $dir (no tmux)"
     cd "$dir" || return 1
-    git stash; git fetch origin; git checkout dev/claude-1 2>/dev/null || git checkout -b dev/claude-1; git pull origin dev/claude-1
+    git stash; git fetch origin; git checkout $DEV_BRANCH 2>/dev/null || git checkout -b $DEV_BRANCH; git pull origin $DEV_BRANCH
     claude
     return
   fi
@@ -762,7 +829,7 @@ PY
 
 # _dev_resume_session <session> <dir> <session-id> — sibling of _dev_new_session:
 # create a detached, logged tmux session in <dir>, but RESUME an existing Claude
-# conversation (claude -r) rather than starting fresh on dev/claude-1. Same name
+# conversation (claude -r) rather than starting fresh on $DEV_BRANCH. Same name
 # + log path convention so tgo/tread/tpaste/dev treat it like any dev session.
 _dev_resume_session() {
   local session="$1" dir="$2" sid="$3"
