@@ -1424,11 +1424,11 @@ _tbeam_pull_transcript() {
 # _tbeam_pull <host> [all] [fg] — the reverse beam: SUMMON a session that lives on
 # <host> down to THIS machine and land it here. Scans the host's transcripts over
 # ssh (its dotfiles define the same _claude_session_rows), fzf-picks locally,
-# rsync's the chosen transcript back, then resumes it here — a local tpush in
-# effect. --all widens the picker past $PWD; -f resumes in this terminal instead
-# of a detached dev slot.
+# rsync's the chosen transcript back, stops the origin copy on <host> (the move —
+# see _tbeam_kill_owner), then resumes it here — a local tpush in effect. --all
+# widens the picker past $PWD; -f resumes in this terminal instead of a dev slot.
 _tbeam_pull() {
-  local host="$1" all="$2" fg="$3" notmux="$4"
+  local host="$1" all="$2" fg="$3"
   command -v fzf >/dev/null 2>&1 || { echo "tbeam: fzf not installed (brew install fzf)" >&2; return 1; }
 
   # Pull the HOST's session list (all projects), keep only real rows, then scope
@@ -1456,6 +1456,16 @@ _tbeam_pull() {
   echo "⟳ Beaming ${sid[1,8]}… ($cwd) from $host → here"
   _tbeam_pull_transcript "$cwd" "$host" || return 1
 
+  # It's a MOVE, not a copy: the transcript is local now, so stop the origin copy
+  # on $host (the dev-<repo>-<slot> there stamped with this id) — otherwise it
+  # keeps running and two live owners of one id diverge (the tpush/tpop
+  # invariant). _tbeam_kill_owner is shared dotfiles code; run it on the host over
+  # ssh with the id in TB_SID (same env-var contract as _tbeam_land). Idle/absent
+  # → it's a silent no-op. Done before we land so we don't race our own resume.
+  local killed
+  killed=$(ssh "$host" "TB_SID=${(q)sid} zsh -lic _tbeam_kill_owner" 2>/dev/null | tail -1)
+  [[ $killed == dev-* ]] && echo "✂ Stopped the live copy on $host ($killed)"
+
   # Honor the one-live-owner invariant (see tpush): if this exact conversation is
   # already running in a local dev slot, reuse it rather than spawning a second
   # resumer on the same id (they'd diverge). _dev_resume_session stamps
@@ -1466,15 +1476,6 @@ _tbeam_pull() {
       existing="$s"; break
     fi
   done
-
-  # --no-tmux: the transcript is local now — don't make a dev slot or resume.
-  # Print the command to resume it by hand here (works from inside Claude too).
-  if [[ -n $notmux ]]; then
-    [[ -n $existing ]] && echo "tbeam: note — this conversation is already live locally in $existing."
-    echo "✓ Pulled ${sid[1,8]}… here (not resumed)."
-    echo "  Resume:  (cd ${(q)cwd} && claude -r $sid)"
-    return
-  fi
 
   # -f: resume straight in this terminal (subshell exec so the terminal returns to
   # your shell when Claude exits). If it's already live locally, attach instead.
@@ -1504,6 +1505,28 @@ _tbeam_pull() {
   fi
 }
 
+# _tbeam_kill_owner — stop the dev-<repo>-<slot> tmux session on THIS machine that
+# owns the session id in $TB_SID (matched on the CLAUDE_RESUME_ID stamp), if one
+# is live. This is what turns tbeam from a copy into a MOVE: once a session has
+# landed on the far side, its origin-side owner is killed so exactly one live
+# claude owns the id — two live owners of one transcript have no lock and diverge
+# (the same invariant tpush/tpop protect). Shared dotfiles code so the caller can
+# run it on the *remote* origin over ssh; the id rides in $TB_SID (env, not args)
+# to dodge nested ssh-quoting, exactly like _tbeam_land. kill-session only SIGHUPs
+# claude, but the transcript is appended live and already synced, so nothing is
+# lost. Echoes the killed session name as its last line (caller reports it);
+# silent, returns nonzero, if the id isn't live in any local dev slot.
+_tbeam_kill_owner() {
+  local sid="$TB_SID" s
+  [[ -n $sid ]] || return 1
+  for s in ${(f)"$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^dev-')"}; do
+    if [[ "$(tmux show-environment -t "$s" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)" == "$sid" ]]; then
+      tmux kill-session -t "$s" 2>/dev/null && { print -r -- "$s"; return 0; }
+    fi
+  done
+  return 1
+}
+
 # _tbeam_land — runs ON the destination host. It's defined in the shared dotfiles
 # (so it exists on every machine); the laptop invokes it over ssh with the work
 # passed in the environment: TB_CWD, TB_SID, TB_MODE (tmux|fg), TB_ATTACH.
@@ -1526,31 +1549,34 @@ _tbeam_land() {
   print -r -- "$session"                        # last line: caller reads it for the hint
 }
 
-# tbeam [-f|--fg] [-d|--detach] [-p|--pick] [-a|--all] [--here] [--no-tmux] [host]
+# tbeam [-f|--fg] [-d|--detach] [-p|--pick] [-a|--all] [--here] [host]
 # — teleport a Claude session between this machine and another (default: $TBEAM_HOST).
-# Like tpush, but across machines. Two directions:
-#   • PUSH (default): send a session FROM here TO <host>, land it there.
+# Like tpush, but across machines. It's a MOVE, not a copy: after the session
+# lands on the far side, tbeam stops the origin's live owner (the dev slot stamped
+# with that id, or — when run from inside Claude — this foreground claude itself)
+# so exactly one live claude owns the id. Two live owners of one transcript have
+# no lock and diverge; this is the same invariant tpush/tpop protect. Two directions:
+#   • PUSH (default): send a session FROM here TO <host>, land it there, stop it here.
 #       – From INSIDE Claude: grabs THIS conversation + $PWD (always detaches — a
-#         Bash subprocess has no TTY to ssh -t into; you get an attach hint).
+#         Bash subprocess has no TTY to ssh -t into), lands it on <host>, then
+#         SIGTERMs this copy so the move completes (like tpush's auto-exit).
 #       – From a plain shell: fzf-pick a session (scoped to $PWD; -a for every repo).
 #       Default landing is a detached dev-<repo>-<slot> on <host>; then it ssh's
-#       you straight in.
+#       you straight in (with -d, it just prints how to attach).
 #   • PULL (--here): the reverse — SUMMON a session that lives ON <host> down to
-#       here and land it locally. Always fzf-picks (over the host's sessions,
-#       scoped to $PWD; -a for every repo), then resumes it in a local dev slot.
+#       here, stop the copy on <host>, and land it locally. Always fzf-picks (over
+#       the host's sessions, scoped to $PWD; -a for every repo), into a local slot.
 # Flags:
-#   -f/--fg      resume in the foreground instead of tmux (dies if the shell drops)
+#   -f/--fg      resume in the foreground instead of tmux (no tmux dev slot; dies
+#                if the shell drops). Needs a terminal — not usable inside Claude.
 #   -d/--detach  (push) leave it running on <host>, just print how to attach
 #   -p/--pick    (push) force the picker even when a current session is detectable
 #   -a/--all     picker across every project (both directions)
 #   --here       PULL from <host> to this machine instead of pushing away
-#   --no-tmux    move the transcript only — don't create a tmux dev slot or resume;
-#                print the `claude -r` command to pick it up by hand. The one path
-#                that works from inside Claude (no TTY needed, unlike -f).
 # The session's repo must exist at the same path on both machines (yours all live
 # in ~/code everywhere); the transcript is rsync'd across before it resumes.
 tbeam() {
-  local fg= detach= pick= all= here= notmux= host= a
+  local fg= detach= pick= all= here= host= a
   for a in "$@"; do
     case "$a" in
       -h|--help)   _help_for tbeam; return 0 ;;
@@ -1559,7 +1585,6 @@ tbeam() {
       -p|--pick)   pick=1 ;;
       -a|--all)    pick=1; all=1 ;;
       --here)      here=1 ;;
-      --no-tmux)   notmux=1 ;;
       -*)          echo "tbeam: unknown flag $a" >&2; return 1 ;;
       *)           host="$a" ;;
     esac
@@ -1573,7 +1598,7 @@ tbeam() {
 
   # --here flips the direction: pull a session off <host> onto this machine.
   if [[ -n $here ]]; then
-    _tbeam_pull "$host" "$all" "$fg" "$notmux"
+    _tbeam_pull "$host" "$all" "$fg"
     return
   fi
 
@@ -1601,15 +1626,17 @@ tbeam() {
   echo "⟳ Beaming ${sid[1,8]}… ($cwd) → $host"
   _tbeam_sync_transcript "$cwd" "$host" || return 1
 
-  # --no-tmux: just move the transcript across — don't make a dev-<repo>-<slot>
-  # session and don't resume anything. Print the command to pick it up by hand on
-  # the host. Unlike -f (which needs a TTY to ssh -t into), this works from inside
-  # Claude too, since it never tries to attach — it's the "move it, I'll resume it
-  # myself" path. Takes precedence over -f/-d if both are given.
-  if [[ -n $notmux ]]; then
-    echo "✓ Synced ${sid[1,8]}… to $host (not resumed)."
-    echo "  Resume there:  ssh $host -t \"zsh -lic 'cd ${(q)cwd} && claude -r $sid'\""
-    return
+  # It's a MOVE, not a copy: now that the transcript is on $host, stop the origin
+  # (here) so the id has one live owner. Two cases for "the origin":
+  #   • picker mode — the session may be live in a LOCAL dev slot; kill it (we're
+  #     in a plain shell, not attached to it, so this is safe). Done now, before
+  #     the blocking ssh -t branches below take over the terminal.
+  #   • current-session mode (inside Claude) — the origin is THIS foreground
+  #     claude, not a dev slot, so we can't kill-session it; instead we SIGTERM it
+  #     at the very end (see the detached branch), mirroring tpush's auto-exit.
+  if [[ -z $CLAUDE_CODE_SESSION_ID ]]; then
+    local killed; killed=$(TB_SID=$sid _tbeam_kill_owner)
+    [[ $killed == dev-* ]] && echo "✂ Stopped the local copy ($killed) — moved to $host"
   fi
 
   # Foreground mode: resume straight in the ssh session (needs a real terminal).
@@ -1636,6 +1663,22 @@ tbeam() {
     echo "  Attach: ssh $host -t \"zsh -lic 'tgo $repo $slot'\"    (or ssh $host, then: tgo $repo $slot)"
   else
     echo "  Attach: ssh $host -t \"zsh -lic 'tmux attach -t $session'\""
+  fi
+
+  # current-session move (inside Claude): the origin is THIS foreground claude, so
+  # the kill-block up top skipped it. Now that the session is live on $host, exit
+  # here so the id keeps one owner — mirrors tpush's auto-exit: SIGTERM the
+  # controlling claude (it flushes and quits in ~2s; transcript is appended live,
+  # so only the in-flight turn is lost). The hints above are already flushed. If
+  # the process can't be found, fall back to asking for a manual /exit.
+  if [[ -n $CLAUDE_CODE_SESSION_ID ]]; then
+    local cpid; cpid=$(_tpush_claude_pid)
+    if [[ -n $cpid ]]; then
+      echo "Moved to $host — exiting this copy so it has one owner."
+      kill -TERM "$cpid"
+    else
+      echo "→ This session now lives on $host. Type /exit here so two copies don't diverge."
+    fi
   fi
 }
 
@@ -1743,7 +1786,7 @@ help() {
 _ff_repos()     { _arguments "1:repo:(${(k)DEV_REPOS})" '2:slot:(1 2 3 4)' }
 _dev_repos()    { _arguments "1:repo:(${(k)DEV_REPOS})" '2:slot:(1 2 3 4 new)' '*:flag:(--no-tmux)' }
 _sleepmgr_cmd() { _arguments '1:command:(status disable enable help)' }
-_tbeam_args()   { _arguments '*:option:(-f --fg -d --detach -p --pick -a --all --here --no-tmux -h --help)' }
+_tbeam_args()   { _arguments '*:option:(-f --fg -d --detach -p --pick -a --all --here -h --help)' }
 compdef _dev_repos    dev
 compdef _ff_repos     tgo tpaste tread tplan tpop
 compdef _tbeam_args   tbeam
