@@ -603,11 +603,11 @@ _dev_rows_all() {
 
 # _dev_list_remote — `dev ls -r`: _dev_list across THIS machine AND every
 # $REMOTE_HOSTS host. Same rendering as _dev_list (the "● attached · ✓ active
-# context" header, STATUS/SESSION/WORKING ON columns, $COLUMNS-truncated summary),
-# but driven by _dev_rows_all instead of a direct tmux scan, and the SESSION column
-# is host-qualified for remote rows (`mini/dot-3`) while local rows stay bare
-# (`dot-1`) — so you can survey what's live everywhere from one terminal. Read-only;
-# to actually pull a remote one down, `tbeam --here <host>` (its picker / -s <id>).
+# context" header, $COLUMNS-truncated summary), but driven by _dev_rows_all instead
+# of a direct tmux scan, and with a dedicated HOST column (STATUS/HOST/SESSION/
+# WORKING ON) — local rows read `local`, remote rows their $REMOTE_HOSTS key — so you
+# can survey what's live everywhere from one terminal. Read-only; to actually pull a
+# remote one down, `tbeam --here <host>` (its picker / -s <id>).
 _dev_list_remote() {
   local rows; rows=$(_dev_rows_all)
   if [[ -z $rows ]]; then
@@ -616,24 +616,25 @@ _dev_list_remote() {
   fi
   local g c y r0=
   if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; r0=$'\e[0m'; fi
-  # widest SESSION name (host-qualified for remote) so WORKING ON lines up
-  local host sid cwd slot state context summary name name_w=7
+  # widest HOST and SESSION cells so both columns line up (headers are the floor:
+  # "HOST"=4, "SESSION"=7). HOST is its own column, SESSION stays the bare slot.
+  local host sid cwd slot state context summary host_w=4 name_w=7
   while IFS=$'\t' read -r host sid cwd slot state context summary; do
-    [[ $host == local ]] && name="$slot" || name="$host/$slot"
-    (( ${#name} > name_w )) && name_w=${#name}
+    (( ${#host} > host_w )) && host_w=${#host}
+    (( ${#slot} > name_w )) && name_w=${#slot}
   done <<< "$rows"
-  local avail=$(( ${COLUMNS:-80} - 11 - name_w ))
-  (( avail < 12 )) && avail=$(( 80 - 11 - name_w ))
+  # prefix before WORKING ON = 2 indent + 8 STATUS + host_w + 1 gap + name_w + 1 gap
+  local avail=$(( ${COLUMNS:-80} - 12 - host_w - name_w ))
+  (( avail < 12 )) && avail=$(( 80 - 12 - host_w - name_w ))
   print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context"
   print -r -- ""
-  printf '  %s%-8s%-*s %s%s\n' "$y" 'STATUS' $name_w 'SESSION' 'WORKING ON' "$r0"
+  printf '  %s%-8s%-*s %-*s %s%s\n' "$y" 'STATUS' $host_w 'HOST' $name_w 'SESSION' 'WORKING ON' "$r0"
   local amark cmark
   while IFS=$'\t' read -r host sid cwd slot state context summary; do
-    [[ $host == local ]] && name="$slot" || name="$host/$slot"
     [[ $state == attached ]] && amark="${g}●${r0}" || amark='○'
     [[ $context == active ]] && cmark="${c}✓${r0}" || cmark=' '
     (( ${#summary} > avail )) && summary="${summary[1,avail-1]}…"
-    printf '  %s %s     %-*s %s%s%s\n' "$amark" "$cmark" $name_w "$name" "$y" "$summary" "$r0"
+    printf '  %s %s     %-*s %-*s %s%s%s\n' "$amark" "$cmark" $host_w "$host" $name_w "$slot" "$y" "$summary" "$r0"
   done <<< "$rows"
 }
 
@@ -800,7 +801,7 @@ _dev_new_session() {
 #   -f, --fg     run git setup + claude inline, no tmux session (alias: --no-tmux)
 #   -y, --yes    dev kill: skip the "Claude is live" confirm (alias: --force)
 #   -r, --remote dev ls: also list LIVE dev slots on every $REMOTE_HOSTS host,
-#                host-qualified (mini/dot-3); pull one down with `tbeam --here`
+#                under a HOST column; pull one down with `tbeam --here <host>`
 #
 # repo is a key of DEV_REPOS (configured in ~/.zshrc.local). The checked-out branch
 # is per-repo (DEV_BRANCHES[repo], else $DEV_BRANCH). dev kill matches session names,
