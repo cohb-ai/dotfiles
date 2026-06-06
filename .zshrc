@@ -21,27 +21,51 @@ autoload -Uz compinit && compinit
 # Color is emitted only when stdout is a TTY (so `cmd -h | cat` stays plain).
 _help_for() {
   local name="${1:?_help_for: need a function name}"
-  local b='' d='' c='' r=''
-  [[ -t 1 ]] && { b=$'\e[1m' d=$'\e[2m' c=$'\e[36m' r=$'\e[0m'; }
   awk -v fn="$name" '
     /^#/                  { blk = blk $0 ORS; next }
     $0 ~ "^" fn "\\(\\)"  { printf "%s", blk; found = 1; exit }
                           { blk = "" }
     END                   { exit !found }
-  ' ~/.zshrc | sed 's/^# \{0,1\}//' | awk -v b="$b" -v d="$d" -v c="$c" -v r="$r" '
+  ' ~/.zshrc | sed 's/^# \{0,1\}//' | _help_style
+}
+
+# _help_style — the gh-style RENDERER, split out from _help_for so the dynamic
+# no-arg/error paths (which list the actual ${(k)DEV_REPOS}, not a static comment)
+# render identically to `-h`. Reads plain text on stdin and styles it by the same
+# conventions documented above _help_for: line 1 "<name> — <tagline>" bolds the
+# name; a "Usage:" line bolds the label; a bare "Word:" line is a section header;
+# 2-space-indented "term  <2+sp>desc" rows become cyan/dim two-column rows, their
+# descriptions auto-aligned to the widest term. Color only when stdout is a TTY —
+# and because this is the LAST stage of every help pipe, `-t 1` here is the real
+# terminal test (so `cmd -h | cat` still comes out plain).
+_help_style() {
+  local b='' d='' c='' r=''
+  [[ -t 1 ]] && { b=$'\e[1m' d=$'\e[2m' c=$'\e[36m' r=$'\e[0m'; }
+  awk -v b="$b" -v d="$d" -v c="$c" -v r="$r" '
     # Pass 1: buffer every line, detecting two-column rows and the widest term so
-    # descriptions can align to a common column regardless of comment spacing.
+    # descriptions can align to a common column regardless of input spacing. A line
+    # indented 3+ spaces that is NOT a 2-space kv row is a description CONTINUATION
+    # (a wrapped second line of a row description) — remembered de-indented so pass 2
+    # can hang it under the aligned description column, not its hand-typed indent.
     {
       raw[NR] = $0
+      kvline = 0; contline = 0
       if ($0 ~ /^  [^ ]/) {
         body = substr($0, 3)
         if (match(body, / {2,}/)) {
-          iskv[NR]  = 1
+          iskv[NR]  = 1; kvline = 1
           kterm[NR] = substr(body, 1, RSTART - 1)
           kdesc[NR] = substr(body, RSTART + RLENGTH)
           if (length(kterm[NR]) > maxw) maxw = length(kterm[NR])
         }
+      } else if (eligible && $0 ~ /^   +[^ ]/) {
+        # an indented line right after a kv row (or its continuation) is a wrapped
+        # second line of that description — re-indented in pass 2. A Usage: line or
+        # paragraph is NOT eligible, so its indented follow-on stays verbatim.
+        iscont[NR] = 1; contline = 1
+        ct = $0; sub(/^ +/, "", ct); cont[NR] = ct
       }
+      eligible = (kvline || contline)
     }
     # Pass 2: classify and colorize each line.
     END {
@@ -53,6 +77,8 @@ _help_for() {
         } else if (iskv[n]) {
           printf "  %s%s%s%*s%s%s%s\n", \
             c, kterm[n], r, maxw - length(kterm[n]) + 2, "", d, kdesc[n], r
+        } else if (iscont[n]) {
+          printf "%*s%s%s%s\n", maxw + 4, "", d, cont[n], r
         } else if (line ~ /^Usage:/) {
           printf "%s%s%s%s\n", b, "Usage:", r, substr(line, 7)
         } else if (line ~ /^[A-Z][A-Za-z]*:$/) {
@@ -775,7 +801,11 @@ _dev_kill() {
   local repo="$1" slot="$2" force="$3"
 
   if [[ -z "$repo" ]]; then
-    echo "Usage: dev kill <repo> <slot|all> [-y]"
+    {
+      print -r -- "dev kill — tear down a dev session (or all of a repo's)"
+      print -r -- ""
+      print -r -- "Usage: dev kill <repo> <slot|all> [-y]"
+    } | _help_style
     return 1
   fi
 
@@ -865,8 +895,8 @@ _dev_new_session() {
 #   -f, --fg     no tmux: foreground-RESUME the named slot if it's live (≡ tpop),
 #                else git setup + a fresh claude inline (alias: --no-tmux)
 #   -y, --yes    dev kill: skip the "Claude is live" confirm (alias: --force)
-#   -r, --remote act on a slot live on another $REMOTE_HOSTS host, host inferred:
-#                attach in place; with `ls` list every host; with `kill` kill it there
+#   -r, --remote  act on a slot live on another $REMOTE_HOSTS host, host inferred:
+#                 attach in place; with `ls` list every host; with `kill` kill it there
 #   --here       with -r: PULL the remote session down to THIS machine into a local
 #                dev slot instead of attaching in place (implies -r)
 #
@@ -933,17 +963,27 @@ dev() {
   # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
 
   if [[ -z "$repo" || -z "${DEV_REPOS[$repo]}" ]]; then
-    echo "Usage: dev <${(kj:|:)DEV_REPOS:-repo}> [slot|new] [-f]"
-    echo "       dev list | dev ls         → show all sessions (attached + active context)"
-    echo "       dev kill <repo> <slot|all> [-y] → tear down a session (or all of a repo's)"
-    if (( ${#DEV_REPOS} )); then
-      local _k
-      for _k in ${(ok)DEV_REPOS}; do echo "  $_k → ${DEV_REPOS[$_k]}"; done
-    else
-      echo "  (no repos configured — add them to ~/.zshrc.local; see .zshrc.local.example)"
-    fi
-    echo "  new      → force a brand-new slot instead of reattaching"
-    echo "  -f/--fg  → run git setup + claude inline (no tmux session)"
+    # Styled like `dev -h` (piped through _help_style), but the Repos: section is
+    # built from the ACTUAL ${(k)DEV_REPOS} — the dynamic bit static help can't show.
+    {
+      print -r -- "dev — open or reattach a Claude session in a per-repo tmux slot"
+      print -r -- ""
+      print -r -- "Usage: dev <${(kj:|:)DEV_REPOS:-repo}> [slot|new] [-f]"
+      print -r -- ""
+      print -r -- "Commands:"
+      print -r -- "  dev <repo> [slot|new]       open/reattach (slot 1-4, or 'new' to force fresh)"
+      print -r -- "  dev list | ls [-r] [-a]     list sessions (attached + active context)"
+      print -r -- "  dev kill <repo> <slot|all>  tear down a session (-y to skip the confirm)"
+      print -r -- "  dev -h                      full help — options, remote (-r), --here"
+      print -r -- ""
+      print -r -- "Repos:"
+      if (( ${#DEV_REPOS} )); then
+        local _k
+        for _k in ${(ok)DEV_REPOS}; do print -r -- "  $_k  ${DEV_REPOS[$_k]}"; done
+      else
+        print -r -- "  (none configured — add them to ~/.zshrc.local; see .zshrc.local.example)"
+      fi
+    } | _help_style
     return 1
   fi
 
@@ -1188,10 +1228,17 @@ tread() {
   # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
 
   if [[ -z "$repo" || -z "${DEV_REPOS[$repo]}" ]]; then
-    echo "Usage: tread <${(kj:|:)DEV_REPOS:-repo}> [slot]"
-    # list available logs
-    echo "Available logs:"
-    ls "$HOME/.tmux-logs/" 2>/dev/null || echo "  (none)"
+    {
+      print -r -- "tread — open a dev slot's tmux log in less"
+      print -r -- ""
+      print -r -- "Usage: tread <${(kj:|:)DEV_REPOS:-repo}> [slot]"
+      print -r -- ""
+      print -r -- "Logs:"
+      local -a _logs=( "$HOME/.tmux-logs/"*.log(N) )
+      local _l
+      for _l in $_logs; do print -r -- "  ${${_l:t}%.log}  ${_l}"; done
+      (( ${#_logs} )) || print -r -- "  (none yet — start one with 'dev <repo> <slot>')"
+    } | _help_style
     return 1
   fi
 
