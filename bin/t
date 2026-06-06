@@ -196,7 +196,7 @@ def _render_local(rows, scope, st):
             has_fg = True
     foot = "reattach: t open <repo> <slot>"
     if has_fg:
-        foot += " · foreground (:fg): t fg <repo>"
+        foot += " · foreground (:fg): t fg"
     print()
     print(f"  {st.y}{foot}{st.r}")
 
@@ -222,7 +222,7 @@ def _render_remote(rows, scope, st):
     foot = ("reattach: t open <repo> <slot> · on host: t open <repo> <slot> --remote · "
             "pull: --here")
     if has_fg:
-        foot += " · foreground (:fg): t on <host> t fg <repo>"
+        foot += " · foreground (:fg): t on <host> t fg"
     print()
     print(f"  {st.y}{foot}{st.r}")
 
