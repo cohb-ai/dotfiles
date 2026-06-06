@@ -228,6 +228,19 @@ def cmd_session_rows(cfg, args):
     return 0
 
 
+def cmd_land(cfg, args):
+    """Resume a beamed session on this host. Reads TB_CWD/TB_SID/TB_MODE/TB_ATTACH
+    from the env (set by the beam orchestrator over ssh, dodging nested-quote hell)
+    and delegates to the proven zsh _tbeam_land."""
+    os.execvp("zsh", ["zsh", "-lic", "_tbeam_land"])
+
+
+def cmd_kill_owner(cfg, args):
+    """Stop the local dev slot that owns TB_SID (the MOVE / one-live-owner step).
+    Delegates to the proven zsh _tbeam_kill_owner."""
+    os.execvp("zsh", ["zsh", "-lic", "_tbeam_kill_owner"])
+
+
 # ─── subprocess-safe verbs ─────────────────────────────────────────────────────
 
 def cmd_on(cfg, args):
@@ -320,8 +333,7 @@ def _read_usage(cfg):
 
 _PENDING = {
     "open": "dev <repo> [slot]", "fg": "dev <repo> fg", "pop": "tpop",
-    "push": "tpush", "beam": "tbeam", "find": "tfind", "land": "(internal)",
-    "kill-owner": "(internal)", "__resolve": "(internal)",
+    "push": "tpush", "beam": "tbeam", "find": "tfind", "__resolve": "(internal)",
 }
 
 
@@ -411,6 +423,7 @@ def build_parser():
 IMPLEMENTED = {
     "ls": cmd_ls, "session-rows": cmd_session_rows, "on": cmd_on, "read": cmd_read,
     "plan": cmd_plan, "paste": cmd_paste, "kill": cmd_kill,
+    "land": cmd_land, "kill-owner": cmd_kill_owner,
 }
 
 
