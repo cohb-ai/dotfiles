@@ -749,13 +749,14 @@ _dev_new_session() {
 #   dev list | ls [-r]           list dev sessions (attached + active context); -r
 #                                spans every $REMOTE_HOSTS host (a cross-host view)
 #   dev kill <repo> <slot|all>   tear down a session  [-y to skip the confirm]
+#   dev -r kill <repo> [slot]    tear down a slot on its $REMOTE_HOSTS host instead
 #
 # Options:
 #   -f, --fg     no tmux: foreground-RESUME the named slot if it's live (≡ tpop),
 #                else git setup + a fresh claude inline (alias: --no-tmux)
 #   -y, --yes    dev kill: skip the "Claude is live" confirm (alias: --force)
-#   -r, --remote act on a slot that's live on another $REMOTE_HOSTS host, host
-#                inferred (attach in place); with `ls`, list every host (cross-host)
+#   -r, --remote act on a slot live on another $REMOTE_HOSTS host, host inferred:
+#                attach in place; with `ls` list every host; with `kill` kill it there
 #   --here       with -r: PULL the remote session down to THIS machine into a local
 #                dev slot instead of attaching in place (implies -r)
 #
@@ -794,8 +795,13 @@ dev() {
   # `dev kill <repo> <slot|all>` — tear down a session (or all of a repo's).
   # Operates on session NAMES, not DEV_REPOS keys, so it can also clean up
   # orphaned sessions whose repo alias no longer exists (e.g. dev-dotfiles-*).
+  # With -r, kill it on its $REMOTE_HOSTS host instead (host auto-inferred).
   if [[ "$repo" == kill ]]; then
-    _dev_kill "${pos[2]}" "${pos[3]}" "$force"
+    if [[ -n $remote ]]; then
+      _dev_remote_kill "${pos[2]}" "${pos[3]}" "$force"
+    else
+      _dev_kill "${pos[2]}" "${pos[3]}" "$force"
+    fi
     return
   fi
 
@@ -896,25 +902,23 @@ dev() {
   fi
 }
 
-# _dev_remote <repo> <slot> <here> <fg> — `dev -r [repo [slot]]` (and `dev <repo> …
-# --here`): act on a dev slot that's live on ANOTHER machine, host AUTO-INFERRED.
-# Scans every $REMOTE_HOSTS host (via _dev_rows_all, minus local) for the live
-# candidates: `dev -r ff 5` → just that slot; `dev -r ff` → every ff slot; bare
-# `dev -r` → every remote slot. One candidate → use it; several → **fzf-pick** among
-# them (host/slot + summary); none → bail with a `dev ls -r` hint. Default ATTACHES
-# IN PLACE on that host (ssh -t + remote `dev`, session stays put — the old `tgo`);
-# <here> PULLS it down to THIS machine instead (_dev_pull, the move tbeam --here did).
-# repo+slot are taken from the chosen row's slot name (split on the last `-`), so the
-# bare/ambiguous picks resolve fully. `zsh -lic` for the usual reason (Homebrew/tmux
-# login PATH, claude interactive PATH). <fg> forwards `-f` (inline there / fg resume).
-_dev_remote() {
-  local repo="$1" slot="$2" here="$3" fg="$4"
-  # Live remote candidates. _dev_rows_all columns: host(1) sid(2) cwd(3) slot(4) … summary(7)
+# _dev_remote_resolve <repo> <slot> — resolve a live REMOTE dev slot to one
+# "<host>\t<repo>\t<slot>" line on stdout (host AUTO-INFERRED). Scans every
+# $REMOTE_HOSTS host (via _dev_rows_all, minus local) for the live candidates:
+# `<repo> <slot>` → just that slot; `<repo>` (no slot) → every slot of that repo;
+# empty → every remote slot. One candidate → it; several → **fzf-pick** (host/slot +
+# summary; needs a TTY+fzf, else it lists them and returns 1); none → return 1 with a
+# `dev ls -r` hint. The chosen slot name "<repo>-<num>" is split on the LAST dash
+# (repos like `dotfiles` have none) so the repo+slot come back fully resolved. Shared
+# by `dev -r` (attach/pull) and `dev -r kill`. Diagnostics → stderr (stdout is captured).
+_dev_remote_resolve() {
+  local repo="$1" slot="$2"
+  # _dev_rows_all columns: host(1) sid(2) cwd(3) slot(4) state(5) context(6) summary(7)
   local rows; rows=$(_dev_rows_all 2>/dev/null | awk -F'\t' '$1 != "local"')
   [[ -n $rows ]] || { echo "dev: no live dev sessions on any remote host (\`dev ls -r\`)." >&2; return 1; }
   local match
   if [[ -z $repo ]]; then
-    match=$rows                                                  # bare `dev -r` → all remote
+    match=$rows                                                  # bare → all remote
   elif [[ -n $slot ]]; then
     match=$(print -r -- "$rows" | awk -F'\t' -v w="${repo}-${slot}" '$4==w')
   else
@@ -923,7 +927,6 @@ _dev_remote() {
   local n; n=$(print -r -- "$match" | grep -c .)
   (( n )) || { echo "dev: no live '$repo${slot:+ $slot}' session on any remote host (\`dev ls -r\` to see what's live where)." >&2; return 1; }
 
-  # Resolve to one (host, slot-name). One candidate → take it; several → fzf-pick.
   local host hostslot
   if (( n == 1 )); then
     host=${match%%$'\t'*}
@@ -937,13 +940,23 @@ _dev_remote() {
     host=${picked%%$'\t'*}
     hostslot=${${picked#*$'\t'}%%$'\t'*}
   else
-    # no terminal / no fzf — can't pick, so list and bail
     echo "dev: '$repo${slot:+ $slot}' is live in more than one place (install fzf or name a slot):" >&2
     print -r -- "$match" | awk -F'\t' '{printf "  %s  %s  %s\n", $1, $4, $7}' >&2
     return 1
   fi
-  # slot name is "<repo>-<num>"; split on the LAST dash (repos like dotfiles have none).
-  local prepo=${hostslot%-*} pslot=${hostslot##*-}
+  printf '%s\t%s\t%s\n' "$host" "${hostslot%-*}" "${hostslot##*-}"
+}
+
+# _dev_remote <repo> <slot> <here> <fg> — `dev -r [repo [slot]]` (and `dev <repo> …
+# --here`): resolve a live REMOTE slot (host auto-inferred, _dev_remote_resolve) and
+# either ATTACH IN PLACE on that host (default — ssh -t + remote `dev`, session stays
+# put, the old `tgo`) or, with <here>, PULL it down to THIS machine (_dev_pull, the
+# move tbeam --here did). `zsh -lic` for the usual reason (Homebrew/tmux login PATH,
+# claude interactive PATH). <fg> forwards `-f` (inline there / fg resume on a pull).
+_dev_remote() {
+  local repo="$1" slot="$2" here="$3" fg="$4"
+  local res; res=$(_dev_remote_resolve "$repo" "$slot") || return 1
+  local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
   local target="${REMOTE_HOSTS[$host]:-$host}"
 
   if [[ -n $here ]]; then
@@ -958,6 +971,21 @@ _dev_remote() {
   echo "→ Attaching $host:dev-${prepo}-${pslot} (stays on $host; Ctrl-b d to detach)"
   local rcmd="dev ${(q)prepo} ${(q)pslot}"
   [[ -n $fg ]] && rcmd+=" -f"
+  ssh -t "$target" "zsh -lic ${(q)rcmd}"
+}
+
+# _dev_remote_kill <repo> <slot> <force> — `dev -r kill <repo> [slot]`: resolve a live
+# REMOTE slot (host auto-inferred / fzf-picked, _dev_remote_resolve) and tear it down
+# ON that host by running `dev kill <repo> <slot>` there over ssh -t (so its confirm
+# prompt — unless <force>/-y — works through the TTY). The mirror of a local dev kill.
+_dev_remote_kill() {
+  local repo="$1" slot="$2" force="$3"
+  local res; res=$(_dev_remote_resolve "$repo" "$slot") || return 1
+  local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
+  local target="${REMOTE_HOSTS[$host]:-$host}"
+  echo "→ Killing $host:dev-${prepo}-${pslot}"
+  local rcmd="dev kill ${(q)prepo} ${(q)pslot}"
+  [[ -n $force ]] && rcmd+=" -y"
   ssh -t "$target" "zsh -lic ${(q)rcmd}"
 }
 
