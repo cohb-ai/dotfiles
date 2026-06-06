@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+# t — Claude session manager: open/list/move tmux'd Claude sessions (gh-style).
+#
+# Single front door for the Claude-session workflow (was the dev/tpush/tpop/tbeam/
+# tread/tplan/tpaste/tfind/on family). gh-style: `t <verb> [args] [--flags]`, -h
+# everywhere. This BIN owns argument parsing, help, config, the cross-host fan-out,
+# rendering, and the Python-shaped verbs. Verbs that must manipulate the CALLING
+# shell (cd + `claude -r` in the current terminal, the tpush sentinel handoff) are
+# driven by the thin `t()` zsh shim via `t __resolve …` — a bin subprocess cannot
+# cd the parent shell or exec into its TTY.
+#
+# Config: ~/.config/t/config.sh, derived from the live zsh arrays by _t_sync_config
+# in .zshrc (DEV_REPOS / DEV_BRANCHES / REMOTE_HOSTS / DEV_BRANCH). Parsed here with
+# a strict line regex — never sourced (it is shell, but ~/.zshrc.local is not, and
+# we never execute either).
+#
+# Hybrid: the intricate, battle-tested tmux/ps introspection + transcript resolution
+# (the _dev_* helpers) stay as zsh functions; this bin invokes them via `zsh -lic`
+# for the data and renders in Python. Reimplementing ps-tree walking buys nothing.
+
+import argparse
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+HOME = os.path.expanduser("~")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "t", "config.sh")
+
+# ─── config ──────────────────────────────────────────────────────────────────
+
+_CFG_LINE = re.compile(r"^(DEV_REPOS|DEV_BRANCHES|REMOTE_HOSTS)\[([^\]]+)\]=(.*)$|^(DEV_BRANCH)=(.*)$")
+
+
+def _unquote(v):
+    """Strip one layer of zsh ${(q)} quoting (backslash escapes / quotes)."""
+    v = v.strip()
+    if not v:
+        return ""
+    try:
+        parts = shlex.split(v)
+        return parts[0] if parts else ""
+    except ValueError:
+        return v
+
+
+class Config:
+    def __init__(self):
+        self.repos = {}      # alias -> path
+        self.branches = {}   # alias -> branch
+        self.hosts = {}      # alias -> ssh target
+        self.branch = "dev/claude-1"
+        self._load()
+
+    def _load(self):
+        try:
+            with open(CONFIG, errors="ignore") as fh:
+                lines = fh.readlines()
+        except OSError:
+            return  # graceful: no repos configured (mirrors zsh's degradation)
+        for line in lines:
+            m = _CFG_LINE.match(line.rstrip("\n"))
+            if not m:
+                continue
+            if m.group(1):
+                arr, key, val = m.group(1), m.group(2), _unquote(m.group(3))
+                {"DEV_REPOS": self.repos, "DEV_BRANCHES": self.branches,
+                 "REMOTE_HOSTS": self.hosts}[arr][key] = val
+            elif m.group(4):
+                self.branch = _unquote(m.group(5))
+
+    def repo_dir_for_cwd(self, cwd):
+        """Longest DEV_REPOS path that is cwd or an ancestor of it, else ''."""
+        best = ""
+        for path in self.repos.values():
+            if cwd == path or cwd.startswith(path + "/"):
+                if len(path) > len(best):
+                    best = path
+        return best
+
+
+# ─── shell-out helpers ─────────────────────────────────────────────────────────
+
+def zsh_capture(snippet):
+    """Run a zsh login+interactive snippet, return stdout (stderr passes through).
+
+    `-lic` is the same context the remote fan-out uses: ~/bin and Homebrew tmux/fzf
+    are only on the login/interactive PATH, and the _dev_* helpers are defined there.
+    """
+    try:
+        r = subprocess.run(["zsh", "-lic", snippet], stdout=subprocess.PIPE, text=True)
+        return r.stdout
+    except FileNotFoundError:
+        return ""
+
+
+# ─── rendering ───────────────────────────────────────────────────────────────
+
+class Style:
+    def __init__(self):
+        tty = sys.stdout.isatty()
+        self.g = "\033[32m" if tty else ""
+        self.c = "\033[36m" if tty else ""
+        self.y = "\033[2m" if tty else ""
+        self.r = "\033[0m" if tty else ""
+
+
+def _columns():
+    return shutil.get_terminal_size((80, 24)).columns
+
+
+def _truncate(s, avail):
+    if len(s) > avail:
+        return s[:avail - 1] + "…"
+    return s
+
+
+def _parse_rows(text, host_prefixed=False):
+    """Parse _dev_session_rows / _dev_rows_all output into dicts."""
+    rows = []
+    for line in text.splitlines():
+        if not line:
+            continue
+        f = line.split("\t")
+        if host_prefixed:
+            if len(f) < 7:
+                continue
+            host, sid, cwd, slot, state, context, summary = f[:7]
+        else:
+            if len(f) < 6:
+                continue
+            host = "local"
+            sid, cwd, slot, state, context, summary = f[:6]
+        rows.append(dict(host=host, sid=sid, cwd=cwd, slot=slot,
+                         state=state, context=context, summary=summary))
+    return rows
+
+
+def _scope_filter(rows, scope):
+    if not scope:
+        return rows
+    return [r for r in rows if r["cwd"] == scope or r["cwd"].startswith(scope + "/")]
+
+
+def _header(st, scope):
+    note = ""
+    if scope:
+        note = f"   {st.y}(repo: {os.path.basename(scope)} — --all for all){st.r}"
+    return f"dev sessions   {st.g}●{st.r} attached · {st.c}✓{st.r} active context{note}"
+
+
+def cmd_ls(cfg, args):
+    scope = "" if args.all else cfg.repo_dir_for_cwd(os.getcwd())
+    st = Style()
+    if args.remote:
+        rows = _scope_filter(_parse_rows(zsh_capture("_dev_rows_all"), host_prefixed=True), scope)
+        if not rows:
+            where = f" in {os.path.basename(scope)} (t ls -r --all for every repo)," if scope else ""
+            print(f"No dev sessions running{where} on this machine or any reachable host.")
+            return 0
+        _render_remote(rows, scope, st)
+    else:
+        rows = _scope_filter(_parse_rows(zsh_capture("_dev_session_rows")), scope)
+        if not rows:
+            where = f" in {os.path.basename(scope)} (t ls --all for every repo)" if scope else ""
+            print(f"No dev sessions running{where}.")
+            return 0
+        _render_local(rows, scope, st)
+    return 0
+
+
+def _render_local(rows, scope, st):
+    name_w = max([7] + [len(r["slot"]) for r in rows])
+    avail = _columns() - 11 - name_w
+    if avail < 12:
+        avail = 80 - 11 - name_w
+    print(_header(st, scope))
+    print()
+    print(f"  {st.y}{'STATUS':<8}{'SESSION':<{name_w}} WORKING ON{st.r}")
+    has_fg = False
+    for r in rows:
+        amark = f"{st.g}●{st.r}" if r["state"] == "attached" else "○"
+        cmark = f"{st.c}✓{st.r}" if r["context"] == "active" else " "
+        summary = _truncate(r["summary"], avail)
+        print(f"  {amark} {cmark}     {r['slot']:<{name_w}} {st.y}{summary}{st.r}")
+        if r["slot"].endswith(":fg"):
+            has_fg = True
+    foot = "reattach: t open <repo> <slot>"
+    if has_fg:
+        foot += " · foreground (:fg): t fg <repo>"
+    print()
+    print(f"  {st.y}{foot}{st.r}")
+
+
+def _render_remote(rows, scope, st):
+    host_w = max([4] + [len(r["host"]) for r in rows if r["host"] != "local"])
+    name_w = max([7] + [len(r["slot"]) for r in rows])
+    avail = _columns() - 12 - host_w - name_w
+    if avail < 12:
+        avail = 80 - 12 - host_w - name_w
+    print(_header(st, scope))
+    print()
+    print(f"  {st.y}{'STATUS':<8}{'HOST':<{host_w}} {'SESSION':<{name_w}} WORKING ON{st.r}")
+    has_fg = False
+    for r in rows:
+        amark = f"{st.g}●{st.r}" if r["state"] == "attached" else "○"
+        cmark = f"{st.c}✓{st.r}" if r["context"] == "active" else " "
+        summary = _truncate(r["summary"], avail)
+        hostcell = "" if r["host"] == "local" else r["host"]
+        print(f"  {amark} {cmark}     {hostcell:<{host_w}} {r['slot']:<{name_w}} {st.y}{summary}{st.r}")
+        if r["slot"].endswith(":fg"):
+            has_fg = True
+    foot = ("reattach: t open <repo> <slot> · on host: t open <repo> <slot> --remote · "
+            "pull: --here")
+    if has_fg:
+        foot += " · foreground (:fg): t on <host> t fg <repo>"
+    print()
+    print(f"  {st.y}{foot}{st.r}")
+
+
+# ─── machine-readable (remote contract) ────────────────────────────────────────
+
+def cmd_session_rows(cfg, args):
+    """The per-host scan behind `t ls -r`. Delegates to the proven zsh helper."""
+    sys.stdout.write(zsh_capture("_dev_session_rows"))
+    return 0
+
+
+# ─── subprocess-safe verbs ─────────────────────────────────────────────────────
+
+def cmd_on(cfg, args):
+    if not args.rest:
+        # interactive login shell on the host
+        target = cfg.hosts.get(args.host, args.host)
+        os.execvp("ssh", ["ssh", "-t", target])
+    host = args.host
+    target = cfg.hosts.get(host, host)
+    inner = " ".join(shlex.quote(a) for a in args.rest)
+    os.execvp("ssh", ["ssh", "-t", target, f"zsh -lic {shlex.quote(inner)}"])
+
+
+_PERL_STRIP = r"s/\r//g; s/\x07//g; s/\x1b\[[\d;]*[ABCDEFGHJKLMNSTXZfhln]//g; s/\x1b[()][012AB]//g"
+
+
+def cmd_read(cfg, args):
+    if not args.repo or args.repo not in cfg.repos:
+        _read_usage(cfg)
+        return 1
+    slot = args.slot or "1"
+    logfile = os.path.join(HOME, ".tmux-logs", f"dev-{args.repo}-{slot}.log")
+    if not os.path.isfile(logfile):
+        print(f"No log found: {logfile}")
+        print(f"(start a session with 't open {args.repo} {slot}' first)")
+        return 1
+    perl = subprocess.Popen(["perl", "-pe", _PERL_STRIP, logfile], stdout=subprocess.PIPE)
+    less = subprocess.Popen(["less", "-R", "+G"], stdin=perl.stdout)
+    perl.stdout.close()
+    less.wait()
+    return 0
+
+
+def _read_usage(cfg):
+    repos = "|".join(cfg.repos) or "repo"
+    print(f"t read — open a dev slot's tmux log in less\n")
+    print(f"Usage: t read <{repos}> [slot]\n")
+    print("Logs:")
+    logdir = os.path.join(HOME, ".tmux-logs")
+    logs = sorted(f for f in os.listdir(logdir)) if os.path.isdir(logdir) else []
+    logs = [f for f in logs if f.endswith(".log")]
+    if logs:
+        for f in logs:
+            print(f"  {f[:-4]}  {os.path.join(logdir, f)}")
+    else:
+        print("  (none yet — start one with 't open <repo> <slot>')")
+
+
+# ─── not-yet-ported verbs (additive phase; old commands still work) ─────────────
+
+_PENDING = {
+    "open": "dev <repo> [slot]", "fg": "dev <repo> fg", "pop": "tpop",
+    "push": "tpush", "beam": "tbeam", "plan": "tplan", "paste": "tpaste",
+    "find": "tfind", "kill": "dev kill", "land": "(internal)",
+    "kill-owner": "(internal)", "__resolve": "(internal)",
+}
+
+
+def cmd_pending(cfg, args):
+    old = _PENDING.get(args._verb, "the old command")
+    print(f"t {args._verb}: not yet wired into `t` (coming in a later refactor step). "
+          f"For now use: {old}", file=sys.stderr)
+    return 2
+
+
+# ─── argument parsing (gh-style) ───────────────────────────────────────────────
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="t", description="Claude session manager (open/list/move tmux'd Claude sessions).")
+    sub = p.add_subparsers(dest="verb", metavar="<verb>")
+
+    sp = sub.add_parser("open", help="open or reattach a session in a per-repo tmux slot")
+    sp.add_argument("repo", nargs="?")
+    sp.add_argument("slot", nargs="?")
+    sp.add_argument("--new", action="store_true", help="force a fresh session")
+    sp.add_argument("--fg", action="store_true", help="no tmux: foreground-resume / run inline")
+    sp.add_argument("-r", "--remote", action="store_true", help="attach a slot live on another host")
+    sp.add_argument("--here", action="store_true", help="with --remote: pull it down to this machine")
+
+    sp = sub.add_parser("fg", help="reattach a foreground (:fg) session in this terminal")
+    sp.add_argument("repo", nargs="?")
+
+    sp = sub.add_parser("ls", help="list dev sessions (attached + active context)")
+    sp.add_argument("-r", "--remote", action="store_true", help="span every $REMOTE_HOSTS host")
+    sp.add_argument("-a", "--all", action="store_true", help="every repo (not just the current)")
+
+    sp = sub.add_parser("kill", help="tear down a session")
+    sp.add_argument("repo", nargs="?")
+    sp.add_argument("slot", nargs="?")
+    sp.add_argument("-y", "--yes", action="store_true", help="skip the 'Claude is live' confirm")
+    sp.add_argument("-r", "--remote", action="store_true", help="kill it on its host instead")
+
+    sp = sub.add_parser("push", help="push this session into a detached background tmux slot")
+    sp.add_argument("-p", "--pick", action="store_true", help="force the picker")
+    sp.add_argument("-a", "--all", action="store_true", help="picker across every project")
+
+    sp = sub.add_parser("pop", help="pull a tmux'd session back to the foreground")
+    sp.add_argument("repo", nargs="?")
+    sp.add_argument("slot", nargs="?")
+
+    sp = sub.add_parser("beam", help="send a session to another machine and resume it there")
+    sp.add_argument("repo", nargs="?")
+    sp.add_argument("slot", nargs="?")
+    sp.add_argument("--host", help="destination machine (default: $REMOTE_HOSTS[mini])")
+    sp.add_argument("--fg", action="store_true", help="resume in the foreground, no tmux slot")
+    sp.add_argument("-d", "--detach", action="store_true", help="leave it running there; print attach hint")
+    sp.add_argument("-p", "--pick", action="store_true", help="force the picker")
+    sp.add_argument("-a", "--all", action="store_true", help="picker across every project")
+    sp.add_argument("-s", "--session", help="target a session by id or unique prefix")
+
+    sp = sub.add_parser("read", help="read a dev slot's scrollable tmux log")
+    sp.add_argument("repo", nargs="?")
+    sp.add_argument("slot", nargs="?")
+
+    sp = sub.add_parser("plan", help="render the plan a session wrote")
+    sp.add_argument("repo", nargs="?")
+    sp.add_argument("slot", nargs="?")
+    sp.add_argument("-a", "--all", action="store_true", help="fzf-pick across every project")
+
+    sp = sub.add_parser("paste", help="paste the latest screenshot path into a session")
+    sp.add_argument("repo", nargs="?")
+    sp.add_argument("slot", nargs="?")
+
+    sp = sub.add_parser("find", help="semantic search across saved sessions, then resume")
+    sp.add_argument("-k", "--keyword", action="store_true", help="offline keyword ranking (no Sonnet)")
+    sp.add_argument("query", nargs="*")
+
+    sp = sub.add_parser("on", help="run a command on a remote host (or open a shell)")
+    sp.add_argument("host")
+    sp.add_argument("rest", nargs=argparse.REMAINDER)
+
+    # machine-readable / internal (hidden-ish; still have -h)
+    sub.add_parser("session-rows", help="machine-readable per-host scan (remote contract)")
+    sub.add_parser("land", help="(internal) resume a beamed session on this host")
+    sub.add_parser("kill-owner", help="(internal) stop the local owner of a session id")
+    rp = sub.add_parser("__resolve", help="(internal) resolve a shell action for the t() shim")
+    rp.add_argument("rest", nargs=argparse.REMAINDER)
+    return p
+
+
+IMPLEMENTED = {
+    "ls": cmd_ls, "session-rows": cmd_session_rows, "on": cmd_on, "read": cmd_read,
+}
+
+
+def main(argv):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.verb:
+        parser.print_help()
+        return 0
+    cfg = Config()
+    handler = IMPLEMENTED.get(args.verb)
+    if handler:
+        return handler(cfg, args)
+    args._verb = args.verb
+    return cmd_pending(cfg, args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(0)
