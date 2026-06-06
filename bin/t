@@ -171,14 +171,17 @@ def cmd_ls(cfg, args):
     else:
         rows = _scope_filter(_parse_rows(zsh_capture("_dev_session_rows")), scope)
         if not rows:
-            where = f" in {os.path.basename(scope)} (t ls --all for every repo)" if scope else ""
-            print(f"No dev sessions running{where}.")
+            where = f" in {os.path.basename(scope)}" if scope else ""
+            hints = ([f"t ls --all for every repo"] if scope else []) + \
+                    (["t ls -r for other machines"] if cfg.hosts else [])
+            tail = f"  ({' · '.join(hints)})" if hints else ""
+            print(f"No dev sessions running{where}.{tail}")
             return 0
-        _render_local(rows, scope, st)
+        _render_local(rows, scope, st, bool(cfg.hosts))
     return 0
 
 
-def _render_local(rows, scope, st):
+def _render_local(rows, scope, st, has_remote=False):
     name_w = max([7] + [len(r["slot"]) for r in rows])
     avail = _columns() - 11 - name_w
     if avail < 12:
@@ -197,6 +200,8 @@ def _render_local(rows, scope, st):
     foot = "reattach: t open <repo> <slot>"
     if has_fg:
         foot += " · foreground: t fg <id>"
+    if has_remote:
+        foot += " · other machines: t ls -r"
     print()
     print(f"  {st.y}{foot}{st.r}")
 
