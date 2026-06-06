@@ -740,12 +740,12 @@ _dev_new_session() {
 # dev — open/reattach a Claude Code tmux session (local or on another host)
 #
 # Usage: dev <repo> [slot|new] [-f]
-#        dev -r <repo> [slot] [--here]
+#        dev -r [repo [slot]] [--here]
 #
 # Commands:
 #   dev <repo> [slot|new]        open/reattach (slot 1-4, or 'new' to force fresh)
-#   dev -r <repo> [slot]         attach a slot that's live on a $REMOTE_HOSTS host
-#                                (host auto-inferred), over ssh — it stays there
+#   dev -r [repo [slot]]         attach a slot that's live on another $REMOTE_HOSTS
+#                                host (host auto-inferred; fzf-pick if several match)
 #   dev list | ls [-r]           list dev sessions (attached + active context); -r
 #                                spans every $REMOTE_HOSTS host (a cross-host view)
 #   dev kill <repo> <slot|all>   tear down a session  [-y to skip the confirm]
@@ -887,55 +887,67 @@ dev() {
   fi
 }
 
-# _dev_remote <repo> <slot> <here> <fg> — `dev -r <repo> [slot]` (and `dev <repo> …
+# _dev_remote <repo> <slot> <here> <fg> — `dev -r [repo [slot]]` (and `dev <repo> …
 # --here`): act on a dev slot that's live on ANOTHER machine, host AUTO-INFERRED.
-# Scans every $REMOTE_HOSTS host (via _dev_rows_all, minus local) for a live
-# dev-<repo>-<slot> — slot omitted → the repo's single remote slot — and finds which
-# host it's on. Default ATTACHES IN PLACE there (ssh -t + remote `dev`, so it
-# reattaches the slot and drops you in over the ssh TTY; the session stays put — the
-# old `tgo`/`on <host> tgo`). With <here> it PULLS the session down to THIS machine
-# instead (_dev_pull, the move tbeam --here used to do). Ambiguous (slot live on >1
-# host, or no slot and several live) → list the candidates and bail. `zsh -lic` for
-# the same reason `on`/`_tbeam_land` use it (Homebrew/tmux login PATH, claude
-# interactive PATH). <fg> forwards `-f` (inline claude there, or fg resume on a pull).
+# Scans every $REMOTE_HOSTS host (via _dev_rows_all, minus local) for the live
+# candidates: `dev -r ff 5` → just that slot; `dev -r ff` → every ff slot; bare
+# `dev -r` → every remote slot. One candidate → use it; several → **fzf-pick** among
+# them (host/slot + summary); none → bail with a `dev ls -r` hint. Default ATTACHES
+# IN PLACE on that host (ssh -t + remote `dev`, session stays put — the old `tgo`);
+# <here> PULLS it down to THIS machine instead (_dev_pull, the move tbeam --here did).
+# repo+slot are taken from the chosen row's slot name (split on the last `-`), so the
+# bare/ambiguous picks resolve fully. `zsh -lic` for the usual reason (Homebrew/tmux
+# login PATH, claude interactive PATH). <fg> forwards `-f` (inline there / fg resume).
 _dev_remote() {
   local repo="$1" slot="$2" here="$3" fg="$4"
-  [[ -n $repo ]] || { echo "dev: usage: dev -r <repo> [slot] [--here]   (host is auto-inferred)" >&2; return 1; }
-  # Find the live slot on a REMOTE host. _dev_rows_all columns: host,sid,cwd,slot(4),…
+  # Live remote candidates. _dev_rows_all columns: host(1) sid(2) cwd(3) slot(4) … summary(7)
   local rows; rows=$(_dev_rows_all 2>/dev/null | awk -F'\t' '$1 != "local"')
+  [[ -n $rows ]] || { echo "dev: no live dev sessions on any remote host (\`dev ls -r\`)." >&2; return 1; }
   local match
-  if [[ -n $slot ]]; then
+  if [[ -z $repo ]]; then
+    match=$rows                                                  # bare `dev -r` → all remote
+  elif [[ -n $slot ]]; then
     match=$(print -r -- "$rows" | awk -F'\t' -v w="${repo}-${slot}" '$4==w')
   else
     match=$(print -r -- "$rows" | awk -F'\t' -v w="${repo}-" 'index($4,w)==1')
   fi
   local n; n=$(print -r -- "$match" | grep -c .)
-  if (( n == 0 )); then
-    echo "dev: no live '$repo${slot:+ $slot}' session on any remote host (\`dev ls -r\` to see what's live where)." >&2
-    return 1
-  fi
-  if (( n > 1 )); then
-    echo "dev: '$repo${slot:+ $slot}' is live in more than one place — narrow it down:" >&2
+  (( n )) || { echo "dev: no live '$repo${slot:+ $slot}' session on any remote host (\`dev ls -r\` to see what's live where)." >&2; return 1; }
+
+  # Resolve to one (host, slot-name). One candidate → take it; several → fzf-pick.
+  local host hostslot
+  if (( n == 1 )); then
+    host=${match%%$'\t'*}
+    hostslot=$(print -r -- "$match" | awk -F'\t' '{print $4}')
+  elif [[ -t 1 ]] && command -v fzf >/dev/null 2>&1; then
+    local picked
+    picked=$(print -r -- "$match" | awk -F'\t' '{printf "%s\t%s\t%s/%-12s %s\n", $1, $4, $1, $4, $7}' \
+          | fzf --delimiter=$'\t' --with-nth=3 --no-hscroll \
+                --prompt="dev -r ${repo:-pick} > " --height=40% --reverse) || return 1
+    [[ -n $picked ]] || return 1
+    host=${picked%%$'\t'*}
+    hostslot=${${picked#*$'\t'}%%$'\t'*}
+  else
+    # no terminal / no fzf — can't pick, so list and bail
+    echo "dev: '$repo${slot:+ $slot}' is live in more than one place (install fzf or name a slot):" >&2
     print -r -- "$match" | awk -F'\t' '{printf "  %s  %s  %s\n", $1, $4, $7}' >&2
-    echo "  or run it on the host directly: on <host> dev $repo <slot>" >&2
     return 1
   fi
-  local host=${match%%$'\t'*}
-  local hostslot; hostslot=$(print -r -- "$match" | awk -F'\t' '{print $4}')
-  local rslot=${hostslot#${repo}-}                 # slot number for the remote dev cmd
+  # slot name is "<repo>-<num>"; split on the LAST dash (repos like dotfiles have none).
+  local prepo=${hostslot%-*} pslot=${hostslot##*-}
   local target="${REMOTE_HOSTS[$host]:-$host}"
 
   if [[ -n $here ]]; then
-    _dev_pull "$host" "$target" "$repo" "$rslot" "$fg"
+    _dev_pull "$host" "$target" "$prepo" "$pslot" "$fg"
     return
   fi
   if [[ ! -t 1 ]]; then
     echo "dev: attaching to a remote session needs a terminal." >&2
-    echo "  From a terminal: dev -r $repo $rslot   (or --here to pull it local)" >&2
+    echo "  From a terminal: dev -r $prepo $pslot   (or --here to pull it local)" >&2
     return 1
   fi
-  echo "→ Attaching $host:dev-${repo}-${rslot} (stays on $host; Ctrl-b d to detach)"
-  local rcmd="dev ${(q)repo} ${(q)rslot}"
+  echo "→ Attaching $host:dev-${prepo}-${pslot} (stays on $host; Ctrl-b d to detach)"
+  local rcmd="dev ${(q)prepo} ${(q)pslot}"
   [[ -n $fg ]] && rcmd+=" -f"
   ssh -t "$target" "zsh -lic ${(q)rcmd}"
 }
