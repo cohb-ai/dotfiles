@@ -1824,7 +1824,7 @@ _tbeam_land() {
 #   -p, --pick          (push) force the picker even when a session is detectable
 #   -a, --all           picker across every project (both directions)
 #   --here              PULL from <host> to this machine instead of pushing away
-#   --include-remote    PULL picker over LIVE dev slots across this machine AND
+#   -r, --include-remote  PULL picker over LIVE dev slots across this machine AND
 #                       every $REMOTE_HOSTS host (a cross-host `dev ls`); pick one
 #                       to resume here — a local pick attaches, a remote pick beams
 #                       it down. Offline hosts are skipped; -a widens past $PWD
@@ -1851,7 +1851,7 @@ tbeam() {
       -p|--pick)            pick=1 ;;
       -a|--all)             pick=1; all=1 ;;
       --here)               here=1 ;;
-      --include-remote)     include_remote=1 ;;
+      -r|--include-remote)  include_remote=1 ;;
       -s|--session|--id)    shift; sid_arg="$1" ;;
       -s=*|--session=*|--id=*) sid_arg="${1#*=}" ;;
       -*)                   echo "tbeam: unknown flag $1" >&2; return 1 ;;
@@ -2168,7 +2168,7 @@ help() {
 _ff_repos()     { _arguments "1:repo:(${(k)DEV_REPOS})" '2:slot:(1 2 3 4)' }
 _dev_repos()    { _arguments "1:repo:(${(k)DEV_REPOS})" '2:slot:(1 2 3 4 new)' '*:flag:(-f --fg --no-tmux -y --yes)' }
 _sleepmgr_cmd() { _arguments '1:command:(status disable enable help)' }
-_tbeam_args()   { _arguments '*:option:(-f --fg -d --detach -p --pick -a --all --here --include-remote -s --session --id -h --help)' }
+_tbeam_args()   { _arguments '*:option:(-f --fg -d --detach -p --pick -a --all --here -r --include-remote -s --session --id -h --help)' }
 _on_hosts()     { _arguments "1:host:(${(k)REMOTE_HOSTS})" '*::command: _normal' }
 compdef _dev_repos    dev
 compdef _ff_repos     tgo tpaste tread tplan tpop
