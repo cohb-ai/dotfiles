@@ -29,6 +29,13 @@ import sys
 HOME = os.path.expanduser("~")
 CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "t", "config.sh")
 
+# Every zsh helper we spawn is `zsh -lic` (login+interactive — required so .zshrc is
+# sourced and the _dev_* functions exist). An interactive login shell exiting under
+# macOS Terminal.app triggers its shell-session-save, which prints "Saving session…"
+# noise to stderr on every `t ls`/`t read`/etc. Disable it for our children (inherited
+# by subprocess + execvp); does not affect the user's own shell.
+os.environ["SHELL_SESSIONS_DISABLE"] = "1"
+
 # ─── config ──────────────────────────────────────────────────────────────────
 
 _CFG_LINE = re.compile(r"^(DEV_REPOS|DEV_BRANCHES|REMOTE_HOSTS)\[([^\]]+)\]=(.*)$|^(DEV_BRANCH)=(.*)$")
