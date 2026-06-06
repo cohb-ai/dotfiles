@@ -192,6 +192,31 @@ unset _repo
 [[ -z ${REMOTE_HOSTS[mini]} && -n ${MINI_HOST:-${TBEAM_HOST:-}} ]] \
   && REMOTE_HOSTS[mini]="${MINI_HOST:-$TBEAM_HOST}"
 
+# _t_sync_config — derive ~/.config/t/config.sh from the live DEV_* / REMOTE_HOSTS
+# arrays so `bin/t` (a Python executable that can't read zsh assoc arrays) has a
+# single source of truth. Emits plain `NAME[key]=value` / `NAME=value` data lines;
+# bin/t parses them with a strict line regex and NEVER sources the file (and never
+# sources ~/.zshrc.local, which can hold arbitrary shell — completions, conditionals).
+# zsh itself keeps using the live arrays (cd/host shortcuts, completions) and does not
+# read this cache. mtime-gated: rewritten only when ~/.zshrc.local or ~/.zshrc is newer
+# than the cache, so it is ~2 stats on a normal prompt; `dots` re-sources .zshrc (whose
+# repo mtime bumps on pull) and so refreshes it. Absent ~/.zshrc.local → an empty-array
+# cache, mirroring zsh's own graceful "no repos configured" degradation.
+_t_sync_config() {
+  local cache="${XDG_CONFIG_HOME:-$HOME/.config}/t/config.sh"
+  local src="$HOME/.zshrc.local"
+  [[ -f $cache && $cache -nt $src && $cache -nt $HOME/.zshrc ]] && return
+  mkdir -p "${cache:h}" 2>/dev/null || return
+  local k
+  {
+    for k in ${(k)DEV_REPOS};    do print -r -- "DEV_REPOS[$k]=${(q)DEV_REPOS[$k]}"; done
+    for k in ${(k)DEV_BRANCHES}; do print -r -- "DEV_BRANCHES[$k]=${(q)DEV_BRANCHES[$k]}"; done
+    for k in ${(k)REMOTE_HOSTS}; do print -r -- "REMOTE_HOSTS[$k]=${(q)REMOTE_HOSTS[$k]}"; done
+    print -r -- "DEV_BRANCH=${(q)DEV_BRANCH}"
+  } >| "$cache"
+}
+_t_sync_config
+
 # Generate a shorthand function per host: `mini …` ≡ `on mini …`. A function (not
 # an alias) so it forwards "$@" and also works bare (`mini` → a shell on it). `on`
 # is defined further down; function bodies bind late, so order doesn't matter.
