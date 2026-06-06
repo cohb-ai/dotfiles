@@ -283,7 +283,7 @@ def _delegate(snippet):
 
 
 def cmd_plan(cfg, args):
-    parts = ["tplan"]
+    parts = ["_t_plan"]
     if args.all:
         parts.append("--all")
     if args.repo:
@@ -294,7 +294,7 @@ def cmd_plan(cfg, args):
 
 
 def cmd_paste(cfg, args):
-    parts = ["tpaste"]
+    parts = ["_t_paste"]
     if args.repo:
         parts.append(shlex.quote(args.repo))
     if args.slot:
@@ -303,8 +303,8 @@ def cmd_paste(cfg, args):
 
 
 def cmd_kill(cfg, args):
-    # remote kill = `dev -r kill <repo> [slot]`; local = `dev kill <repo> <slot|all>`
-    parts = ["dev", "-r", "kill"] if args.remote else ["dev", "kill"]
+    # remote kill = `_t_dev -r kill <repo> [slot]`; local = `_t_dev kill <repo> <slot|all>`
+    parts = ["_t_dev", "-r", "kill"] if args.remote else ["_t_dev", "kill"]
     if args.repo:
         parts.append(shlex.quote(args.repo))
     if args.slot:
@@ -329,18 +329,20 @@ def _read_usage(cfg):
         print("  (none yet — start one with 't open <repo> <slot>')")
 
 
-# ─── not-yet-ported verbs (additive phase; old commands still work) ─────────────
+# ─── shell-bound verbs — handled by the t() zsh shim, not the bin ──────────────
+# These cd the calling shell / exec `claude -r` in the current terminal / hand off
+# the tpush sentinel — a subprocess cannot. The t() function in .zshrc intercepts
+# them and calls the _t_dev/_t_pop/_t_push/_t_find/_t_beam helpers. Reaching the bin
+# here means it was invoked DIRECTLY (e.g. `command t open`, or a context with no
+# t() function) — which cannot perform the shell action.
 
-_PENDING = {
-    "open": "dev <repo> [slot]", "fg": "dev <repo> fg", "pop": "tpop",
-    "push": "tpush", "beam": "tbeam", "find": "tfind", "__resolve": "(internal)",
-}
+_SHELL_BOUND = {"open", "fg", "pop", "push", "beam", "find", "__resolve"}
 
 
 def cmd_pending(cfg, args):
-    old = _PENDING.get(args._verb, "the old command")
-    print(f"t {args._verb}: not yet wired into `t` (coming in a later refactor step). "
-          f"For now use: {old}", file=sys.stderr)
+    print(f"t {args._verb}: this verb runs in the shell via the `t` function, not the "
+          f"bin. You reached bin/t directly (e.g. `command t {args._verb}`) — run "
+          f"`t {args._verb} …` in an interactive zsh instead.", file=sys.stderr)
     return 2
 
 

@@ -221,7 +221,7 @@ _t_sync_config
 # an alias) so it forwards "$@" and also works bare (`mini` → a shell on it). `on`
 # is defined further down; function bodies bind late, so order doesn't matter.
 for _host in ${(k)REMOTE_HOSTS}; do
-  functions[$_host]="on ${(q)_host} \"\$@\""
+  functions[$_host]="t on ${(q)_host} \"\$@\""
 done
 unset _host
 
@@ -274,7 +274,7 @@ _tpaste_claude_ready() {
 #   tpaste ff 3     paste into dev-ff-3 (creating it if it doesn't exist)
 #
 # Grabs the newest image in iCloud Drive; press Enter in the session to send it.
-tpaste() {
+_t_paste() {
   [[ "$1" == -h || "$1" == --help ]] && { _help_for tpaste; return 0; }
   local repo="${1:-ff}"
   local slot="$2"
@@ -906,9 +906,9 @@ _dev_kill() {
 
   if [[ -z "$repo" ]]; then
     {
-      print -r -- "dev kill — tear down a dev session (or all of a repo's)"
+      print -r -- "t kill — tear down a dev session (or all of a repo's)"
       print -r -- ""
-      print -r -- "Usage: dev kill <repo> <slot|all> [-y]"
+      print -r -- "Usage: t kill <repo> <slot|all> [-y]   (--remote to kill it on its host)"
     } | _help_style
     return 1
   fi
@@ -1010,7 +1010,7 @@ _dev_new_session() {
 # is per-repo (DEV_BRANCHES[repo], else $DEV_BRANCH). dev kill matches session names,
 # so it also reaches orphaned sessions whose repo alias is gone (dev kill dotfiles 1).
 # Surveying what's live everywhere is `dev ls -r`; sending a session away is `tbeam`.
-dev() {
+_t_dev() {
   local no_tmux= force= remote= here= all=
   local -a pos
   local arg
@@ -1069,18 +1069,20 @@ dev() {
   # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
 
   if [[ -z "$repo" || -z "${DEV_REPOS[$repo]}" ]]; then
-    # Styled like `dev -h` (piped through _help_style), but the Repos: section is
-    # built from the ACTUAL ${(k)DEV_REPOS} — the dynamic bit static help can't show.
+    # Styled gh-style (piped through _help_style), but the Repos: section is built
+    # from the ACTUAL ${(k)DEV_REPOS} — the dynamic bit static help can't show.
     {
-      print -r -- "dev — open or reattach a Claude session in a per-repo tmux slot"
+      print -r -- "t open — open or reattach a Claude session in a per-repo tmux slot"
       print -r -- ""
-      print -r -- "Usage: dev <${(kj:|:)DEV_REPOS:-repo}> [slot|new] [-f]"
+      print -r -- "Usage: t open <${(kj:|:)DEV_REPOS:-repo}> [slot] [--new] [--fg]"
       print -r -- ""
       print -r -- "Commands:"
-      print -r -- "  dev <repo> [slot|new]       open/reattach (slot 1-4, or 'new' to force fresh)"
-      print -r -- "  dev list | ls [-r] [-a]     list sessions (attached + active context)"
-      print -r -- "  dev kill <repo> <slot|all>  tear down a session (-y to skip the confirm)"
-      print -r -- "  dev -h                      full help — options, remote (-r), --here"
+      print -r -- "  t open <repo> [slot]        open/reattach (slot 1-4, --new to force fresh)"
+      print -r -- "  t open <repo> [slot] --fg   no tmux: foreground-resume / run inline"
+      print -r -- "  t open <repo> [slot] --remote   attach a slot live on another host (--here pulls)"
+      print -r -- "  t ls [-r] [-a]              list sessions (attached + active context)"
+      print -r -- "  t kill <repo> <slot|all>    tear down a session (-y to skip the confirm)"
+      print -r -- "  t -h                        full verb list + per-verb help"
       print -r -- ""
       print -r -- "Repos:"
       if (( ${#DEV_REPOS} )); then
@@ -1119,7 +1121,7 @@ dev() {
   # branch dance — slot is a tmux concept, so the fresh path has none.
   if [[ -n "$no_tmux" ]]; then
     if [[ -n "$slot" && "$slot" != new ]] && tmux has-session -t "dev-${repo}-${slot}" 2>/dev/null; then
-      tpop "$repo" "$slot"
+      _t_pop "$repo" "$slot"
       return
     fi
     echo "Starting claude in $dir (no tmux)"
@@ -1243,12 +1245,12 @@ _dev_remote() {
   fi
   if [[ ! -t 1 ]]; then
     echo "dev: attaching to a remote session needs a terminal." >&2
-    echo "  From a terminal: dev -r $prepo $pslot   (or --here to pull it local)" >&2
+    echo "  From a terminal: t open $prepo $pslot --remote   (or --here to pull it local)" >&2
     return 1
   fi
   echo "→ Attaching $host:dev-${prepo}-${pslot} (stays on $host; Ctrl-b d to detach)"
-  local rcmd="dev ${(q)prepo} ${(q)pslot}"
-  [[ -n $fg ]] && rcmd+=" -f"
+  local rcmd="t open ${(q)prepo} ${(q)pslot}"
+  [[ -n $fg ]] && rcmd+=" --fg"
   _term_title "$host: $prepo $pslot"
   ssh -t "$target" "zsh -lic ${(q)rcmd}"
   _term_title ""
@@ -1264,7 +1266,7 @@ _dev_remote_kill() {
   local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
   local target="${REMOTE_HOSTS[$host]:-$host}"
   echo "→ Killing $host:dev-${prepo}-${pslot}"
-  local rcmd="dev kill ${(q)prepo} ${(q)pslot}"
+  local rcmd="t kill ${(q)prepo} ${(q)pslot}"
   [[ -n $force ]] && rcmd+=" -y"
   _term_title "$host: kill $prepo $pslot"
   ssh -t "$target" "zsh -lic ${(q)rcmd}"
@@ -1340,51 +1342,7 @@ _dev_pull() {
   fi
 }
 
-# tread — read the scrollable log for a dev tmux session
-#
-# Usage: tread <repo> [slot]
-#
-# Commands:
-#   tread ff       open the log for the first ff session in less
-#   tread ff 2     open the log for dev-ff-2
-tread() {
-  [[ "$1" == -h || "$1" == --help ]] && { _help_for tread; return 0; }
-  local repo="$1"
-  local slot="${2:-1}"
-
-  # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
-
-  if [[ -z "$repo" || -z "${DEV_REPOS[$repo]}" ]]; then
-    {
-      print -r -- "tread — open a dev slot's tmux log in less"
-      print -r -- ""
-      print -r -- "Usage: tread <${(kj:|:)DEV_REPOS:-repo}> [slot]"
-      print -r -- ""
-      print -r -- "Logs:"
-      local -a _logs=( "$HOME/.tmux-logs/"*.log(N) )
-      local _l
-      for _l in $_logs; do print -r -- "  ${${_l:t}%.log}  ${_l}"; done
-      (( ${#_logs} )) || print -r -- "  (none yet — start one with 'dev <repo> <slot>')"
-    } | _help_style
-    return 1
-  fi
-
-  local logfile="$HOME/.tmux-logs/dev-${repo}-${slot}.log"
-
-  if [[ ! -f "$logfile" ]]; then
-    echo "No log found: $logfile"
-    echo "(start a session with 'dev $repo $slot' first)"
-    return 1
-  fi
-
-  # Pre-process the log to strip control sequences that garble the output:
-  #   \r         — carriage returns overwrite lines in less, making text unreadable
-  #   \007 (^G)  — BEL character that appears as a literal glyph
-  #   CSI seqs   — cursor movement/erase sequences (\e[...A-N/S-Z/f/h/l/n)
-  # SGR sequences (\e[...m) are kept so less -R renders colors normally.
-  perl -pe 's/\r//g; s/\x07//g; s/\x1b\[[\d;]*[ABCDEFGHJKLMNSTXZfhln]//g; s/\x1b[()][012AB]//g' "$logfile" \
-    | less -R +G
-}
+# (tread removed — `t read` is reimplemented natively in bin/t.)
 
 # tplan — render the plan a Claude session wrote
 #
@@ -1399,7 +1357,7 @@ tread() {
 # Resolves a session like the dev/tpop family, then renders the last plan it
 # saved (an absolute ~/.claude/plans/<slug>.md path in the transcript). glow
 # word-wraps for narrow mobile terminals (Termius), falling back to less.
-tplan() {
+_t_plan() {
   [[ "$1" == -h || "$1" == --help ]] && { _help_for tplan; return 0; }
   local sid
   if [[ "$1" == "--all" || "$1" == "-a" ]]; then
@@ -1474,7 +1432,7 @@ tplan() {
 # then Sonnet ranks the genuinely-relevant ones and your fzf pick foreground-resumes
 # (the same landing as tpop). Falls back to keyword order if the claude CLI is
 # unreachable. Searches every project — use dev/tpush/tpop when you know the slot.
-tfind() {
+_t_find() {
   [[ "$1" == -h || "$1" == --help ]] && { _help_for tfind; return 0; }
   local keyword=
   [[ "$1" == "-k" || "$1" == "--keyword" ]] && { keyword=1; shift; }
@@ -1862,7 +1820,7 @@ _tpush_claude_pid() {
 # backgrounds the current chat. From a plain shell: fzf-pick a session. Resumes via
 # `claude -r` into a dev-named slot; attach with the printed command. Refuses to
 # nest when already in tmux. Inverse of tpop.
-tpush() {
+_t_push() {
   local pick= all= a
   for a in "$@"; do
     case "$a" in
@@ -1989,7 +1947,7 @@ tpush() {
 #
 # Kills the tmux session and resumes its conversation here with `claude -r` (the
 # inverse of tpush). Run from a plain shell, not inside the session you're popping.
-tpop() {
+_t_pop() {
   [[ "$1" == -h || "$1" == --help ]] && { _help_for tpop; return 0; }
   local session
   if [[ "$1" == dev-* ]]; then
@@ -2173,7 +2131,7 @@ _tbeam_land() {
 # ssh's you in. (To pull the OTHER way — summon a session that lives on a host down
 # to here — use `dev <host> <repo> <slot> --here`.) The repo must exist at the same
 # ~/code path on both; the transcript is rsync'd before it resumes.
-tbeam() {
+_t_beam() {
   # while/shift (not for-in) so -s/--session can consume the following token as
   # its value; the `=`-joined forms (-s=… / --session=…) work too.
   local fg= detach= pick= all= host= sid_arg=
@@ -2340,41 +2298,9 @@ tbeam() {
   fi
 }
 
-# on — run a command on a remote host ($REMOTE_HOSTS alias, or any ssh target)
-#
-# Usage: on <host> [command...]
-#
-# Arguments:
-#   host         a $REMOTE_HOSTS alias (e.g. mini) or a literal ssh target
-#   command...   command to run there; omit to open an interactive shell
-#
-# Runs <command> on <host> over ssh in a login+interactive shell with a TTY, so
-# your dotfiles functions (dev, tread, …), Homebrew PATH, and tmux all resolve
-# remotely — e.g. `on mini dev dot` starts a dev session there. Each $REMOTE_HOSTS
-# alias also gets its own shorthand function (`mini dev dot` ≡ `on mini dev dot`).
-# Set aliases in ~/.zshrc.local (REMOTE_HOSTS[mini]=…); an unknown host is used
-# as a literal ssh target, so `on box.local uptime` works without registering it.
-on() {
-  [[ "$1" == -h || "$1" == --help ]] && { _help_for on; return 0; }
-  if (( ! $# )); then
-    local aliases="${(kj:, :)REMOTE_HOSTS}"
-    echo "on: usage: on <host> [command...]   (aliases: ${aliases:-none set})" >&2
-    return 1
-  fi
-  local host="$1"; shift
-  local target="${REMOTE_HOSTS[$host]:-$host}"   # registry alias, else a literal target
-  # No command: open an interactive login shell on the host.
-  (( $# )) || { _term_title "$host"; ssh -t "$target"; _term_title ""; return; }
-  # Two quoting layers: (@q) quotes each arg so the remote zsh -c sees the original
-  # words, then (q) wraps the joined string as ONE token for ssh's transport (ssh
-  # otherwise re-splits its remote command on spaces). `zsh -lic` — login +
-  # interactive — is what makes dev/tread/Homebrew/tmux resolve remotely, the same
-  # reason _tbeam_land runs under it.
-  local cmd="${(j: :)${(@q)@}}"
-  _term_title "$host: $cmd"
-  ssh -t "$target" "zsh -lic ${(q)cmd}"
-  _term_title ""
-}
+# (on removed — `t on <host> [cmd…]` is reimplemented natively in bin/t, with the
+# same two-layer quoting and `zsh -lic` remote contract. The per-host shorthand
+# functions below now forward to `t on`.)
 
 # t — Claude session manager: open/list/move tmux'd Claude sessions (gh-style)
 # The single front door (replacing the dev/tpush/tpop/tbeam/tread/tplan/tpaste/
@@ -2398,12 +2324,12 @@ t() {
   [[ -z $verb ]] && { command t; return; }
   shift
   case "$verb" in
-    open)  _t_open "$@" ;;            # → dev / dev -r / dev … --here (tmux or -f)
-    fg)    dev "$1" fg ;;             # → _dev_adopt_fg (foreground resume here)
-    pop)   tpop "$@" ;;               # → cd + claude -r in THIS terminal
-    push)  tpush "$@" ;;              # → sentinel handoff; claude() wrapper spawns post-exit
-    find)  tfind "$@" ;;              # → rank/pick then cd + claude -r here
-    beam)  _t_beam "$@" ;;            # → tbeam (host moves from --host to a positional)
+    open)  _t_open "$@" ;;            # → _t_dev / -r / … --here (tmux or -f)
+    fg)    _t_dev "$1" fg ;;          # → _dev_adopt_fg (foreground resume here)
+    pop)   _t_pop "$@" ;;             # → cd + claude -r in THIS terminal
+    push)  _t_push "$@" ;;            # → sentinel handoff; claude() wrapper spawns post-exit
+    find)  _t_find "$@" ;;            # → rank/pick then cd + claude -r here
+    beam)  _t_beam_xlate "$@" ;;      # → _t_beam (host moves from --host to a positional)
     *)     command t "$verb" "$@" ;;  # ls/read/plan/paste/kill/on/session-rows/land/kill-owner
   esac
 }
@@ -2421,13 +2347,13 @@ _t_open() {
       *)        a+=("$arg") ;;
     esac
   done
-  dev "${a[@]}"
+  _t_dev "${a[@]}"
 }
 
-# _t_beam — map gh-grammar `t beam [repo] [slot] [--host H] [flags]` onto tbeam's
-# `[repo [slot]] [host]` positional grammar (host moves to the end); tbeam's own
-# -f/--fg/-d/-p/-a/-s flags pass through unchanged.
-_t_beam() {
+# _t_beam_xlate — map gh-grammar `t beam [repo] [slot] [--host H] [flags]` onto the
+# _t_beam impl's `[repo [slot]] [host]` positional grammar (host moves to the end);
+# its own -f/--fg/-d/-p/-a/-s flags pass through unchanged.
+_t_beam_xlate() {
   local -a a; local arg host want_host=
   for arg in "$@"; do
     if [[ -n $want_host ]]; then host=$arg; want_host=; continue; fi
@@ -2436,7 +2362,7 @@ _t_beam() {
       *)      a+=("$arg") ;;
     esac
   done
-  tbeam "${a[@]}" ${host:+"$host"}
+  _t_beam "${a[@]}" ${host:+"$host"}
 }
 
 # help — show this command list, grouped by purpose
@@ -2479,24 +2405,21 @@ help() {
     info[$_r]="$_r — cd straight to ${DEV_REPOS[$_r]:t}"
   done
 
-  # Same for the per-host `on` shortcuts generated from REMOTE_HOSTS — also not
-  # real text in this file, so synthesise an entry per alias.
+  # Same for the per-host shortcuts generated from REMOTE_HOSTS — also not real
+  # text in this file, so synthesise an entry per alias.
   local _hk
   for _hk in ${(k)REMOTE_HOSTS}; do
-    info[$_hk]="$_hk — run a command on ${REMOTE_HOSTS[$_hk]} (≡ on $_hk)"
+    info[$_hk]="$_hk — run a command on ${REMOTE_HOSTS[$_hk]} (≡ t on $_hk)"
   done
 
-  # `dev list` is a subcommand, not its own function, so the parser only captured
-  # `dev`'s first comment line — synthesise an entry so the subcommand is listed.
-  info[dev-list]="dev list|ls — list dev sessions, marking attached + active Claude context"
-
   # Grouping by purpose.  "Title:cmd cmd …" — drop a command's name into a group
-  # to file it; anything uncategorized falls through to "Other" at the end.
+  # to file it; anything uncategorized falls through to "Other" at the end. The
+  # Claude-session family is now the single `t` command (its verbs show in `t -h`).
   local -a groups=(
     "Dotfiles & shell:dots help"
-    "Remote machines:on ${(kj: :)REMOTE_HOSTS}"
+    "Remote machines:${(kj: :)REMOTE_HOSTS}"
     "Git & PRs:prview"
-    "Claude dev sessions (tmux):dev dev-list tread tpaste tpush tpop tbeam tplan tfind ${(kj: :)DEV_REPOS}"
+    "Claude dev sessions (t <verb>):t ${(kj: :)DEV_REPOS}"
     "Claude session sync:csync"
     "Keep the Mac awake:nosleep sleep-manager"
   )
@@ -2545,16 +2468,34 @@ help() {
 
 # --- tab completion for our commands -------------------------------------
 # compinit already ran at the top of this file, so compdef is available here.
-# `dev <Tab>` completes the DEV_REPOS keys (configured in ~/.zshrc.local). These
-# helper names start with `_` so the `help` parser above skips them. (csync takes
-# no args, so it needs no completion.)
-_ff_repos()     { _arguments "1:repo:(${(k)DEV_REPOS})" '2:slot:(1 2 3 4)' }
-_dev_repos()    { _arguments "1:repo:(${(k)DEV_REPOS} list ls kill)" '2:slot:(1 2 3 4 new)' '*:flag:(-f --fg --no-tmux -y --yes -r --remote --here -a --all)' }
+# These helper names start with `_` so the `help` parser above skips them. (csync
+# takes no args, so it needs no completion.)
+#
+# `_t` — subcommand-aware completion for the single `t` command: verbs at position
+# 1; then the per-verb positional (a DEV_REPOS key for repo verbs, a REMOTE_HOSTS
+# key for `on`), and slot/flags after. Pulls live from the ${(k)DEV_REPOS} /
+# ${(k)REMOTE_HOSTS} arrays so it stays current with ~/.zshrc.local.
+_t() {
+  local -a verbs=(open fg ls kill push pop beam read plan paste find on)
+  if (( CURRENT == 2 )); then
+    _describe -t verbs 't verb' verbs
+    return
+  fi
+  case ${words[2]} in
+    open|fg|kill|read|plan|paste|beam)
+      if   (( CURRENT == 3 )); then _values 'repo' ${(k)DEV_REPOS}
+      elif (( CURRENT == 4 )); then _values 'slot' 1 2 3 4 new
+      else _values 'flag' --new --fg --remote --here -y --yes -a --all --host -d --detach -p --pick -s --session -h --help; fi ;;
+    on)
+      (( CURRENT == 3 )) && _values 'host' ${(k)REMOTE_HOSTS} || _normal ;;
+    ls)
+      _values 'flag' -r --remote -a --all -h --help ;;
+    push)
+      _values 'flag' -p --pick -a --all -h --help ;;
+    find)
+      _values 'flag' -k --keyword -h --help ;;
+  esac
+}
 _sleepmgr_cmd() { _arguments '1:command:(status disable enable help)' }
-_tbeam_args()   { _arguments '*:option:(-f --fg -d --detach -p --pick -a --all -s --session --id -h --help)' }
-_on_hosts()     { _arguments "1:host:(${(k)REMOTE_HOSTS})" '*::command: _normal' }
-compdef _dev_repos    dev
-compdef _ff_repos     tpaste tread tplan tpop
-compdef _tbeam_args   tbeam
+compdef _t t
 compdef _sleepmgr_cmd sleep-manager
-compdef _on_hosts     on
