@@ -524,38 +524,117 @@ _dev_list() {
 }
 
 # _dev_session_rows — machine-readable sibling of _dev_list: one tab-separated
-# "<sid>\t<cwd>\t<slot>\t<state>\t<summary>" row per live dev-<repo>-<slot> tmux
-# session (sid = the stamped CLAUDE_RESUME_ID; slot = the name minus `dev-`; state
-# = attached|detached; summary = the same "what it's working on" line _dev_list
-# renders). No glyphs/colors/headers — it's meant to be *collected* (locally and
-# over ssh) and fzf'd, the way _claude_session_rows feeds the transcript picker.
-# This is the per-host scan behind `tbeam --include-remote`: live dev slots are
-# what genuinely differ machine-to-machine (transcripts already converge via
-# csync), so the cross-host view lists these, not transcripts.
+# "<sid>\t<cwd>\t<slot>\t<state>\t<context>\t<summary>" row per live dev-<repo>-<slot>
+# tmux session (sid = the stamped CLAUDE_RESUME_ID; slot = the name minus `dev-`;
+# state = attached|detached; context = active|idle|none — the same distinction the
+# ✓ glyph draws; summary = the "what it's working on" line). No glyphs/colors/headers
+# — it's meant to be *collected* (locally and over ssh, like _claude_session_rows)
+# and re-rendered. This is the per-host scan behind `dev ls -r`: live dev slots are
+# what genuinely differ machine-to-machine (transcripts already converge via csync),
+# so the cross-host view lists these, not transcripts.
 _dev_session_rows() {
   local names
   names=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^dev-' | sort)
   [[ -n $names ]] || return 0
-  local s short sid dir state summary
+  local s short sid dir state context summary
   while IFS= read -r s; do
     short="${s#dev-}"
     dir=$(tmux display-message -p -t "$s" '#{session_path}' 2>/dev/null)
     sid=$(tmux show-environment -t "$s" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
     # `-` sentinel for an unstamped slot (idle / no conversation): keeps every
     # field non-empty so a tab is never a *leading/consecutive* IFS-whitespace
-    # delimiter that `read` would collapse, sliding the columns. Routing treats
-    # `-` as "no conversation to pull".
+    # delimiter that `read` would collapse, sliding the columns.
     [[ -n $sid ]] || sid='-'
     state=$(tmux display-message -p -t "$s" '#{?session_attached,attached,detached}' 2>/dev/null)
     if ! _dev_session_has_claude "$s"; then
-      summary='(no active session)'
+      context=none; summary='(no active session)'
     elif _dev_session_at_welcome "$s"; then
-      summary='(idle — no conversation)'
+      context=idle; summary='(idle — no conversation)'
     else
-      summary=$(_dev_session_summary "$s" "$dir"); [[ -n $summary ]] || summary='(untitled session)'
+      context=active; summary=$(_dev_session_summary "$s" "$dir"); [[ -n $summary ]] || summary='(untitled session)'
     fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$sid" "$dir" "$short" "$state" "$summary"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$sid" "$dir" "$short" "$state" "$context" "$summary"
   done <<< "$names"
+}
+
+# _dev_rows_all — fan _dev_session_rows out over THIS machine + every $REMOTE_HOSTS
+# entry and print each row prefixed with its host ("<host>\t<sid>\t<cwd>\t<slot>\t
+# <state>\t<context>\t<summary>"; host = the REMOTE_HOSTS key, or "local"). The data
+# source behind `dev ls -r`. Remote hosts are scanned IN PARALLEL over ssh
+# (background jobs → temp files → `wait`) with a short ConnectTimeout + BatchMode so
+# a sleeping/offline Mac is skipped fast and noted on stderr, never waited on. Each
+# host's ssh exit code is stashed in a `.rc` file so we can tell "unreachable"
+# (rc 255) from "reachable but the scan errored" (e.g. rc 127 → stale dotfiles), and
+# warn accordingly. local-first; within a host, _dev_session_rows' own order holds.
+# Rows are prefixed verbatim (no re-splitting), so empty fields can't collapse.
+_dev_rows_all() {
+  local tmpd; tmpd=$(mktemp -d) || return 1
+  _dev_session_rows > "$tmpd/.local" 2>/dev/null &
+  local h
+  for h in ${(k)REMOTE_HOSTS}; do
+    ( ssh -o ConnectTimeout=3 -o BatchMode=yes "${REMOTE_HOSTS[$h]}" 'zsh -lic _dev_session_rows' \
+        > "$tmpd/$h" 2>/dev/null
+      print -r -- $? > "$tmpd/$h.rc" ) &
+  done
+  wait
+
+  local host file rc line
+  for host in local ${(k)REMOTE_HOSTS}; do
+    if [[ $host == local ]]; then
+      file="$tmpd/.local"
+    else
+      file="$tmpd/$host"
+      rc=$(< "$tmpd/$host.rc" 2>/dev/null)
+      if [[ -z $rc || $rc == 255 ]]; then          # ssh-level failure = unreachable
+        print -u2 -r -- "dev: $host unreachable — skipped"
+        continue
+      elif [[ $rc != 0 ]]; then                    # reachable, but the scan errored
+        print -u2 -r -- "dev: $host scan failed (rc=$rc; stale dotfiles? run \`dots\` there) — skipped"
+        continue
+      fi
+    fi
+    [[ -s $file ]] || continue
+    while IFS= read -r line; do
+      printf '%s\t%s\n' "$host" "$line"
+    done < "$file"
+  done
+  rm -rf "$tmpd"
+}
+
+# _dev_list_remote — `dev ls -r`: _dev_list across THIS machine AND every
+# $REMOTE_HOSTS host. Same rendering as _dev_list (the "● attached · ✓ active
+# context" header, STATUS/SESSION/WORKING ON columns, $COLUMNS-truncated summary),
+# but driven by _dev_rows_all instead of a direct tmux scan, and the SESSION column
+# is host-qualified for remote rows (`mini/dot-3`) while local rows stay bare
+# (`dot-1`) — so you can survey what's live everywhere from one terminal. Read-only;
+# to actually pull a remote one down, `tbeam --here <host>` (its picker / -s <id>).
+_dev_list_remote() {
+  local rows; rows=$(_dev_rows_all)
+  if [[ -z $rows ]]; then
+    echo "No dev sessions running on this machine or any reachable host."
+    return 0
+  fi
+  local g c y r0=
+  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; r0=$'\e[0m'; fi
+  # widest SESSION name (host-qualified for remote) so WORKING ON lines up
+  local host sid cwd slot state context summary name name_w=7
+  while IFS=$'\t' read -r host sid cwd slot state context summary; do
+    [[ $host == local ]] && name="$slot" || name="$host/$slot"
+    (( ${#name} > name_w )) && name_w=${#name}
+  done <<< "$rows"
+  local avail=$(( ${COLUMNS:-80} - 11 - name_w ))
+  (( avail < 12 )) && avail=$(( 80 - 11 - name_w ))
+  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context"
+  print -r -- ""
+  printf '  %s%-8s%-*s %s%s\n' "$y" 'STATUS' $name_w 'SESSION' 'WORKING ON' "$r0"
+  local amark cmark
+  while IFS=$'\t' read -r host sid cwd slot state context summary; do
+    [[ $host == local ]] && name="$slot" || name="$host/$slot"
+    [[ $state == attached ]] && amark="${g}●${r0}" || amark='○'
+    [[ $context == active ]] && cmark="${c}✓${r0}" || cmark=' '
+    (( ${#summary} > avail )) && summary="${summary[1,avail-1]}…"
+    printf '  %s %s     %-*s %s%s%s\n' "$amark" "$cmark" $name_w "$name" "$y" "$summary" "$r0"
+  done <<< "$rows"
 }
 
 # _dev_kill_one <session> <force> — kill a single dev tmux session. When it holds
@@ -713,18 +792,21 @@ _dev_new_session() {
 #
 # Commands:
 #   dev <repo> [slot|new]        open/reattach (slot 1-4, or 'new' to force fresh)
-#   dev list | ls                list all dev sessions (attached + active context)
+#   dev list | ls [-r]           list dev sessions (attached + active context); -r
+#                                spans every $REMOTE_HOSTS host (a cross-host view)
 #   dev kill <repo> <slot|all>   tear down a session  [-y to skip the confirm]
 #
 # Options:
-#   -f, --fg    run git setup + claude inline, no tmux session (alias: --no-tmux)
-#   -y, --yes   dev kill: skip the "Claude is live" confirm (alias: --force)
+#   -f, --fg     run git setup + claude inline, no tmux session (alias: --no-tmux)
+#   -y, --yes    dev kill: skip the "Claude is live" confirm (alias: --force)
+#   -r, --remote dev ls: also list LIVE dev slots on every $REMOTE_HOSTS host,
+#                host-qualified (mini/dot-3); pull one down with `tbeam --here`
 #
 # repo is a key of DEV_REPOS (configured in ~/.zshrc.local). The checked-out branch
 # is per-repo (DEV_BRANCHES[repo], else $DEV_BRANCH). dev kill matches session names,
 # so it also reaches orphaned sessions whose repo alias is gone (dev kill dotfiles 1).
 dev() {
-  local no_tmux= force=
+  local no_tmux= force= remote=
   local -a pos
   local arg
   # -f/--fg = foreground/no-tmux EVERYWHERE (matches tbeam -f). The kill-confirm
@@ -736,15 +818,17 @@ dev() {
       -h|--help)         _help_for dev; return 0 ;;
       -f|--fg|--no-tmux) no_tmux=1 ;;
       -y|--yes|--force)  force=1 ;;
+      -r|--remote)       remote=1 ;;
       *)                 pos+=("$arg") ;;
     esac
   done
   local repo="${pos[1]}"
   local slot="${pos[2]}"
 
-  # `dev list` (or `ls`) — show sessions + state, then stop.
+  # `dev list` (or `ls`) — show sessions + state, then stop. `-r` spans every
+  # $REMOTE_HOSTS host too (a cross-host view), else just this machine.
   if [[ "$repo" == list || "$repo" == ls ]]; then
-    _dev_list
+    if [[ -n $remote ]]; then _dev_list_remote; else _dev_list; fi
     return
   fi
 
@@ -1680,88 +1764,6 @@ _tbeam_pull() {
   fi
 }
 
-# _tbeam_dev_rows_all — fan _dev_session_rows out over THIS machine + every
-# $REMOTE_HOSTS entry and print "<host>\t<sid>\t<cwd>\t<slot>\t<display>" rows for
-# the unified picker. <host> is the REMOTE_HOSTS key (or "local"); <display> is the
-# human column fzf shows ("<glyph> <host>/<slot>  <summary>"). Remote hosts are
-# scanned IN PARALLEL over ssh (background jobs → temp files, then `wait`) with a
-# short ConnectTimeout + BatchMode so a sleeping/offline Mac is skipped fast and
-# noted on stderr, never waited on — a quick cross-host snapshot is the whole point.
-# Per-host ssh exit status is stashed in a `.rc` file so we can tell "unreachable"
-# (rc≠0, warn) from "reachable but no live slots" (rc=0, empty, silent). local-first
-# ordering; within a host, _dev_session_rows' own (tmux-sorted) order is kept.
-_tbeam_dev_rows_all() {
-  local tmpd; tmpd=$(mktemp -d) || return 1
-  _dev_session_rows > "$tmpd/.local" 2>/dev/null &
-  local h
-  for h in ${(k)REMOTE_HOSTS}; do
-    ( ssh -o ConnectTimeout=3 -o BatchMode=yes "${REMOTE_HOSTS[$h]}" 'zsh -lic _dev_session_rows' \
-        > "$tmpd/$h" 2>/dev/null
-      print -r -- $? > "$tmpd/$h.rc" ) &
-  done
-  wait
-
-  local host file sid cwd slot state summary glyph
-  for host in local ${(k)REMOTE_HOSTS}; do
-    if [[ $host == local ]]; then
-      file="$tmpd/.local"
-    else
-      file="$tmpd/$host"
-      local rc; rc=$(< "$tmpd/$host.rc" 2>/dev/null)
-      if [[ -z $rc || $rc == 255 ]]; then          # ssh-level failure = unreachable
-        print -u2 -r -- "tbeam: $host unreachable — skipped"
-        continue
-      elif [[ $rc != 0 ]]; then                    # reachable, but the scan errored
-        print -u2 -r -- "tbeam: $host scan failed (rc=$rc; stale dotfiles? run \`dots\` there) — skipped"
-        continue
-      fi
-    fi
-    [[ -s $file ]] || continue
-    while IFS=$'\t' read -r sid cwd slot state summary; do
-      [[ $state == attached ]] && glyph='●' || glyph='○'
-      printf '%s\t%s\t%s\t%s\t%s %s  %s\n' "$host" "$sid" "$cwd" "$slot" "$glyph" "$host/$slot" "$summary"
-    done < "$file"
-  done
-  rm -rf "$tmpd"
-}
-
-# _tbeam_include_remote [all] [fg] — the `tbeam --include-remote` picker: one fzf
-# list of LIVE dev slots across this machine AND every $REMOTE_HOSTS host (a
-# cross-host `dev ls`), pick one to resume HERE. A LOCAL pick is already here, so it
-# just attaches the slot (or prints the attach hint when we're inside Claude with no
-# terminal). A REMOTE pick is routed into the existing summon path
-# (_tbeam_pull … -s <sid>): rsync its transcript back, stop the origin slot on the
-# host, land it in a local dev slot — the same MOVE + one-live-owner invariant as
-# `tbeam --here`. Scopes to $PWD (rows carry cwd in field 3) unless <all> widens it.
-_tbeam_include_remote() {
-  local all="$1" fg="$2"
-  command -v fzf >/dev/null 2>&1 || { echo "tbeam: fzf not installed (brew install fzf)" >&2; return 1; }
-  local rows; rows=$(_tbeam_dev_rows_all)
-  [[ -n $rows ]] || { echo "tbeam: no live dev sessions on this machine or any reachable host" >&2; return 1; }
-  [[ -z $all ]] && rows=$(print -r -- "$rows" | awk -F'\t' -v d="$PWD" '$3==d || index($3, d"/")==1')
-  [[ -n $rows ]] || { echo "tbeam: no sessions under $PWD (use -a for every repo/host)" >&2; return 1; }
-  local row; row=$(print -r -- "$rows" | fzf --delimiter=$'\t' --with-nth=5 --no-hscroll \
-        --prompt='resume (local + remote) > ' --height=60% --reverse) || return 1
-  [[ -n $row ]] || return 1
-  local host sid cwd slot rest
-  IFS=$'\t' read -r host sid cwd slot rest <<< "$row"
-
-  if [[ $host == local ]]; then
-    local session="dev-$slot"
-    if [[ -t 1 && -z $CLAUDE_CODE_SESSION_ID ]]; then
-      tmux attach-session -t "$session"
-    else
-      echo "tbeam: $session is already local — attach with: tmux attach -t $session"
-    fi
-    return
-  fi
-
-  [[ -n $sid && $sid != - ]] || { echo "tbeam: $host/$slot has no active conversation to pull" >&2; return 1; }
-  # _tbeam_pull ssh's to its <host> arg directly, so hand it the resolved ssh
-  # target (REMOTE_HOSTS value), not the short key; -s <sid> skips its own picker.
-  _tbeam_pull "${REMOTE_HOSTS[$host]:-$host}" "$all" "$fg" "$sid"
-}
-
 # _tbeam_kill_owner — stop the dev-<repo>-<slot> tmux session on THIS machine that
 # owns the session id in $TB_SID (matched on the CLAUDE_RESUME_ID stamp), if one
 # is live. This is what turns tbeam from a copy into a MOVE: once a session has
@@ -1824,10 +1826,6 @@ _tbeam_land() {
 #   -p, --pick          (push) force the picker even when a session is detectable
 #   -a, --all           picker across every project (both directions)
 #   --here              PULL from <host> to this machine instead of pushing away
-#   -r, --include-remote  PULL picker over LIVE dev slots across this machine AND
-#                       every $REMOTE_HOSTS host (a cross-host `dev ls`); pick one
-#                       to resume here — a local pick attaches, a remote pick beams
-#                       it down. Offline hosts are skipped; -a widens past $PWD
 #   -s, --session <id>  target a session by id or unique prefix (both directions),
 #                       instead of fzf-picking
 #
@@ -1841,7 +1839,7 @@ _tbeam_land() {
 tbeam() {
   # while/shift (not for-in) so -s/--session can consume the following token as
   # its value; the `=`-joined forms (-s=… / --session=…) work too.
-  local fg= detach= pick= all= here= host= sid_arg= include_remote=
+  local fg= detach= pick= all= here= host= sid_arg=
   local -a pos=()
   while (( $# )); do
     case "$1" in
@@ -1851,7 +1849,6 @@ tbeam() {
       -p|--pick)            pick=1 ;;
       -a|--all)             pick=1; all=1 ;;
       --here)               here=1 ;;
-      -r|--include-remote)  include_remote=1 ;;
       -s|--session|--id)    shift; sid_arg="$1" ;;
       -s=*|--session=*|--id=*) sid_arg="${1#*=}" ;;
       -*)                   echo "tbeam: unknown flag $1" >&2; return 1 ;;
@@ -1859,14 +1856,6 @@ tbeam() {
     esac
     shift
   done
-
-  # --include-remote: a cross-host `dev ls` picker (this machine + every
-  # $REMOTE_HOSTS host), pick one to resume HERE. Needs no host positional, so it
-  # dispatches before the grammar/host-default below would demand one.
-  if [[ -n $include_remote ]]; then
-    _tbeam_include_remote "$all" "$fg"
-    return
-  fi
 
   # Positional grammar (push direction): [repo [slot]] [host], matching the
   # dev/tplan/tpop/tgo family so `tbeam ff 1` lines up with `tpop ff 1`. The
@@ -2166,9 +2155,9 @@ help() {
 # helper names start with `_` so the `help` parser above skips them. (csync takes
 # no args, so it needs no completion.)
 _ff_repos()     { _arguments "1:repo:(${(k)DEV_REPOS})" '2:slot:(1 2 3 4)' }
-_dev_repos()    { _arguments "1:repo:(${(k)DEV_REPOS})" '2:slot:(1 2 3 4 new)' '*:flag:(-f --fg --no-tmux -y --yes)' }
+_dev_repos()    { _arguments "1:repo:(${(k)DEV_REPOS} list ls kill)" '2:slot:(1 2 3 4 new)' '*:flag:(-f --fg --no-tmux -y --yes -r --remote)' }
 _sleepmgr_cmd() { _arguments '1:command:(status disable enable help)' }
-_tbeam_args()   { _arguments '*:option:(-f --fg -d --detach -p --pick -a --all --here -r --include-remote -s --session --id -h --help)' }
+_tbeam_args()   { _arguments '*:option:(-f --fg -d --detach -p --pick -a --all --here -s --session --id -h --help)' }
 _on_hosts()     { _arguments "1:host:(${(k)REMOTE_HOSTS})" '*::command: _normal' }
 compdef _dev_repos    dev
 compdef _ff_repos     tgo tpaste tread tplan tpop
