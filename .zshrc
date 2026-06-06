@@ -619,7 +619,7 @@ _dev_list() {
   # prefix before the summary = 2 (indent) + 8 (STATUS field) + name_w + 1 (gap)
   local avail=$(( ${COLUMNS:-80} - 11 - name_w ))
   (( avail < 12 )) && avail=$(( 80 - 11 - name_w ))
-  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context${scope:+   ${y}(${scope:t} — --all for all)${r0}}"
+  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context${scope:+   ${y}(repo: ${scope:t} — --all for all)${r0}}"
   print -r -- ""
   printf '  %s%-8s%-*s %s%s\n' "$y" 'STATUS' $name_w 'SESSION' 'WORKING ON' "$r0"
   local state dir amark cmark summary
@@ -650,6 +650,8 @@ _dev_list() {
     (( ${#fsummary} > avail )) && fsummary="${fsummary[1,avail-1]}…"
     printf '  %s %s     %-*s %s%s%s\n' "${g}●${r0}" "$cmark" $name_w "$_fslot" "$y" "$fsummary" "$r0"
   done <<< "$fgrows"
+  print -r -- ""
+  print -r -- "  ${y}reattach: dev <repo> <slot>${r0}"
 }
 
 # _dev_session_rows — machine-readable sibling of _dev_list: one tab-separated
@@ -736,9 +738,12 @@ _dev_rows_all() {
 # $REMOTE_HOSTS host. Same rendering as _dev_list (the "● attached · ✓ active
 # context" header, $COLUMNS-truncated summary), but driven by _dev_rows_all instead
 # of a direct tmux scan, and with a dedicated HOST column (STATUS/HOST/SESSION/
-# WORKING ON) — local rows read `local`, remote rows their $REMOTE_HOSTS key — so you
-# can survey what's live everywhere from one terminal. Read-only; to actually pull a
-# remote one down, `dev -r --here` (or `dev <host> <repo> <slot> --here`).
+# WORKING ON). A row on THIS machine leaves HOST *blank* (so "here" reads as absence,
+# not a peer host named `local`) while remote rows show their $REMOTE_HOSTS key — that
+# is the local/host disambiguation, and `local` never widens the column. A trailing
+# reattach footer spells out the three verbs (`dev <repo> <slot>` here, `dev -r …` on
+# its host, `--here` to pull). Read-only; to actually pull a remote one down, `dev -r
+# <repo> <slot> --here`.
 _dev_list_remote() {
   local scope="$1"
   local rows; rows=$(_dev_rows_all)
@@ -755,22 +760,27 @@ _dev_list_remote() {
   # "HOST"=4, "SESSION"=7). HOST is its own column, SESSION stays the bare slot.
   local host sid cwd slot state context summary host_w=4 name_w=7
   while IFS=$'\t' read -r host sid cwd slot state context summary; do
-    (( ${#host} > host_w )) && host_w=${#host}
+    # local rows render with a BLANK host cell (see below), so they never widen it.
+    [[ $host != local ]] && (( ${#host} > host_w )) && host_w=${#host}
     (( ${#slot} > name_w )) && name_w=${#slot}
   done <<< "$rows"
   # prefix before WORKING ON = 2 indent + 8 STATUS + host_w + 1 gap + name_w + 1 gap
   local avail=$(( ${COLUMNS:-80} - 12 - host_w - name_w ))
   (( avail < 12 )) && avail=$(( 80 - 12 - host_w - name_w ))
-  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context${scope:+   ${y}(${scope:t} — --all for all)${r0}}"
+  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context${scope:+   ${y}(repo: ${scope:t} — --all for all)${r0}}"
   print -r -- ""
   printf '  %s%-8s%-*s %-*s %s%s\n' "$y" 'STATUS' $host_w 'HOST' $name_w 'SESSION' 'WORKING ON' "$r0"
-  local amark cmark
+  local amark cmark hostcell
   while IFS=$'\t' read -r host sid cwd slot state context summary; do
     [[ $state == attached ]] && amark="${g}●${r0}" || amark='○'
     [[ $context == active ]] && cmark="${c}✓${r0}" || cmark=' '
     (( ${#summary} > avail )) && summary="${summary[1,avail-1]}…"
-    printf '  %s %s     %-*s %-*s %s%s%s\n' "$amark" "$cmark" $host_w "$host" $name_w "$slot" "$y" "$summary" "$r0"
+    # "this machine" rows leave HOST blank so they read as local, not a peer host.
+    hostcell=$host; [[ $host == local ]] && hostcell=
+    printf '  %s %s     %-*s %-*s %s%s%s\n' "$amark" "$cmark" $host_w "$hostcell" $name_w "$slot" "$y" "$summary" "$r0"
   done <<< "$rows"
+  print -r -- ""
+  print -r -- "  ${y}reattach: dev <repo> <slot> · on host: dev -r <repo> <slot> · pull: --here${r0}"
 }
 
 # _dev_kill_one <session> <force> — kill a single dev tmux session. When it holds
