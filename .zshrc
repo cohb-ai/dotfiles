@@ -566,14 +566,18 @@ _dev_fg_rows() {
     [[ -n $cwd ]] || continue
     repo=${cwd:t}
     for k in ${(k)DEV_REPOS}; do [[ ${DEV_REPOS[$k]} == $cwd ]] && { repo=$k; break; }; done
-    label="${repo}:fg"
+    # Label is "<repo>:<short-sid>" — the short Claude session id makes each
+    # foreground row UNIQUE (two `dot` foreground claudes were both "dot:fg" before)
+    # and is the handle `t fg <id>` reattaches by. The colon marks an fg row (tmux
+    # slots use "<repo>-<num>"). A pre-registry session (no id) falls back to ":fg".
     if [[ -n $sid ]]; then
+      label="${repo}:${sid[1,8]}"
       local -a tx=( "$HOME/.claude/projects"/*/"$sid".jsonl(N) )
       title=$([[ -n ${tx[1]} ]] && _transcript_title "${tx[1]}")
       if [[ -n $title ]]; then context=active; summary=$title
       else context=idle; summary='(idle — no conversation)'; fi
     else
-      sid='-'; context=unknown; summary='(foreground claude)'
+      label="${repo}:fg"; sid='-'; context=unknown; summary='(foreground claude)'
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$sid" "$cwd" "$label" attached "$context" "$summary"
   done
@@ -605,25 +609,35 @@ _dev_pid_for_sid() {
 # resumers of one id diverge — hence the SIGTERM-then-wait before `claude -r`, mirroring
 # t pop. Only :fg rows whose id the registry recorded (sid != `-`) are resumable; a
 # pre-registry one must be reattached from its own terminal.
-#   • `t fg`        — no repo: auto-resolve across ALL foreground sessions (one → use
-#                     it, several → fzf-pick). The easy path.
-#   • `t fg <repo>` — restrict to that repo's :fg rows.
+#   • `t fg`          — no arg: auto-resolve across ALL foreground sessions (one → use
+#                       it, several → fzf-pick). The easy path.
+#   • `t fg <id>`     — the short session id shown in `t ls` (e.g. `t fg a4aa5f6a`, or
+#                       the displayed `dot:a4aa5f6a`) → that exact session. Unambiguous.
+#   • `t fg <repo>`   — a DEV_REPOS key → that repo's foreground sessions.
 _dev_adopt_fg() {
-  local repo="$1" rows
-  if [[ -n $repo ]]; then
-    rows=$(_dev_fg_rows 2>/dev/null | awk -F'\t' -v r="${repo}:fg" '$3==r')
-  else
-    rows=$(_dev_fg_rows 2>/dev/null | awk -F'\t' '$3 ~ /:fg$/')
-  fi
-  [[ -n $rows ]] || { echo "t fg: no foreground claude running${repo:+ for '$repo'} (see \`t ls\`)." >&2; return 1; }
+  local arg="$1" rows
+  # all foreground rows (the colon in the slot label marks fg; tmux slots use a dash)
+  rows=$(_dev_fg_rows 2>/dev/null | awk -F'\t' '$3 ~ /:/')
+  [[ -n $rows ]] || { echo "t fg: no foreground claude running (see \`t ls\`)." >&2; return 1; }
   local resumable; resumable=$(print -r -- "$rows" | awk -F'\t' '$1!="-"')
-  [[ -n $resumable ]] || { echo "t fg: foreground claude${repo:+ for '$repo'} predates the session registry (no id recorded) — reattach from its own terminal." >&2; return 1; }
+  [[ -n $resumable ]] || { echo "t fg: foreground claude(s) predate the session registry (no id recorded) — reattach from their own terminal." >&2; return 1; }
+  if [[ -n $arg ]]; then
+    local sel
+    if [[ -n ${DEV_REPOS[$arg]} ]]; then            # an exact repo key → that repo's rows
+      sel=$(print -r -- "$resumable" | awk -F'\t' -v r="$arg" 'index($3, r":")==1')
+    else                                            # else a session id / short id (maybe "<repo>:<id>")
+      local idpart="${arg##*:}"
+      sel=$(print -r -- "$resumable" | awk -F'\t' -v p="$idpart" 'index($1,p)==1')
+    fi
+    [[ -n $sel ]] || { echo "t fg: no foreground session matching '$arg' (see \`t ls\`)." >&2; return 1; }
+    resumable=$sel
+  fi
   local sid cwd
   local -a lines=( ${(f)resumable} )
   if (( ${#lines} == 1 )); then
     IFS=$'\t' read -r sid cwd _ <<< "${lines[1]}"
   else
-    [[ -t 0 && -t 1 ]] || { echo "t fg: several foreground sessions — name one (\`t fg <repo>\`) or pick from a terminal:" >&2; print -r -- "$resumable" | awk -F'\t' '{printf "  %s  %s\n",$3,$6}' >&2; return 1; }
+    [[ -t 0 && -t 1 ]] || { echo "t fg: several foreground sessions — name one (\`t fg <id>\`) or pick from a terminal:" >&2; print -r -- "$resumable" | awk -F'\t' '{printf "  %s  %s\n",$3,$6}' >&2; return 1; }
     local pick
     pick=$(print -r -- "$resumable" | awk -F'\t' '{printf "%s\t%s\t%s\n", $1, $3, $6}' \
              | fzf --with-nth=2.. --delimiter='\t' --prompt="t fg > ") || return 1
@@ -877,8 +891,8 @@ _dev_list_remote() {
   # to its terminal, so it is reattached on its host via `on <host> dev <repo> fg`
   # (shown only when a :fg row is present — slot is field 4 of the prefixed rows).
   local foot="reattach: t open <repo> <slot> · on host: t open <repo> <slot> --remote · pull: --here"
-  print -r -- "$rows" | awk -F'\t' '$4 ~ /:fg$/{f=1} END{exit !f}' \
-    && foot+=" · foreground (:fg): t on <host> t fg"
+  print -r -- "$rows" | awk -F'\t' '$4 ~ /:/{f=1} END{exit !f}' \
+    && foot+=" · foreground: t on <host> t fg <id>"
   print -r -- ""
   print -r -- "  ${y}${foot}${r0}"
 }

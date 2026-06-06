@@ -192,11 +192,11 @@ def _render_local(rows, scope, st):
         cmark = f"{st.c}✓{st.r}" if r["context"] == "active" else " "
         summary = _truncate(r["summary"], avail)
         print(f"  {amark} {cmark}     {r['slot']:<{name_w}} {st.y}{summary}{st.r}")
-        if r["slot"].endswith(":fg"):
+        if ":" in r["slot"]:                       # colon marks a foreground row
             has_fg = True
     foot = "reattach: t open <repo> <slot>"
     if has_fg:
-        foot += " · foreground (:fg): t fg"
+        foot += " · foreground: t fg <id>"
     print()
     print(f"  {st.y}{foot}{st.r}")
 
@@ -217,12 +217,12 @@ def _render_remote(rows, scope, st):
         summary = _truncate(r["summary"], avail)
         hostcell = "" if r["host"] == "local" else r["host"]
         print(f"  {amark} {cmark}     {hostcell:<{host_w}} {r['slot']:<{name_w}} {st.y}{summary}{st.r}")
-        if r["slot"].endswith(":fg"):
+        if ":" in r["slot"]:                       # colon marks a foreground row
             has_fg = True
     foot = ("reattach: t open <repo> <slot> · on host: t open <repo> <slot> --remote · "
             "pull: --here")
     if has_fg:
-        foot += " · foreground (:fg): t on <host> t fg"
+        foot += " · foreground: t on <host> t fg <id>"
     print()
     print(f"  {st.y}{foot}{st.r}")
 
