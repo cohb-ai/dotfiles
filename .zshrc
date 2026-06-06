@@ -1102,6 +1102,13 @@ _dev_remote_resolve() {
   printf '%s\t%s\t%s\n' "$host" "${hostslot%-*}" "${hostslot##*-}"
 }
 
+# _term_title <text> — set the terminal/tab title via an OSC escape. Terminal.app
+# honors it and STOPS auto-titling from the foreground process's argv — which is why
+# a remote attach otherwise reads as the raw `ssh -t mini zsh -lic dev\ dotfiles\ 2`
+# (nothing set a title, so Terminal fell back to the ssh command line). Empty <text>
+# clears it so process tracking resumes. No-op when stdout is not a tty (cmd | cat).
+_term_title() { [[ -t 1 ]] && printf '\e]0;%s\a' "$1" }
+
 # _dev_remote <repo> <slot> <here> <fg> — `dev -r [repo [slot]]` (and `dev <repo> …
 # --here`): resolve a live REMOTE slot (host auto-inferred, _dev_remote_resolve) and
 # either ATTACH IN PLACE on that host (default — ssh -t + remote `dev`, session stays
@@ -1126,7 +1133,9 @@ _dev_remote() {
   echo "→ Attaching $host:dev-${prepo}-${pslot} (stays on $host; Ctrl-b d to detach)"
   local rcmd="dev ${(q)prepo} ${(q)pslot}"
   [[ -n $fg ]] && rcmd+=" -f"
+  _term_title "$host: $prepo $pslot"
   ssh -t "$target" "zsh -lic ${(q)rcmd}"
+  _term_title ""
 }
 
 # _dev_remote_kill <repo> <slot> <force> — `dev -r kill <repo> [slot]`: resolve a live
@@ -1141,7 +1150,9 @@ _dev_remote_kill() {
   echo "→ Killing $host:dev-${prepo}-${pslot}"
   local rcmd="dev kill ${(q)prepo} ${(q)pslot}"
   [[ -n $force ]] && rcmd+=" -y"
+  _term_title "$host: kill $prepo $pslot"
   ssh -t "$target" "zsh -lic ${(q)rcmd}"
+  _term_title ""
 }
 
 # _dev_pull <host> <target> <repo> <slot> <fg> — pull a remote dev slot's session
@@ -2237,14 +2248,16 @@ on() {
   local host="$1"; shift
   local target="${REMOTE_HOSTS[$host]:-$host}"   # registry alias, else a literal target
   # No command: open an interactive login shell on the host.
-  (( $# )) || { ssh -t "$target"; return; }
+  (( $# )) || { _term_title "$host"; ssh -t "$target"; _term_title ""; return; }
   # Two quoting layers: (@q) quotes each arg so the remote zsh -c sees the original
   # words, then (q) wraps the joined string as ONE token for ssh's transport (ssh
   # otherwise re-splits its remote command on spaces). `zsh -lic` — login +
   # interactive — is what makes dev/tread/Homebrew/tmux resolve remotely, the same
   # reason _tbeam_land runs under it.
   local cmd="${(j: :)${(@q)@}}"
+  _term_title "$host: $cmd"
   ssh -t "$target" "zsh -lic ${(q)cmd}"
+  _term_title ""
 }
 
 # help — show this command list, grouped by purpose
