@@ -2376,6 +2376,69 @@ on() {
   _term_title ""
 }
 
+# t — Claude session manager: open/list/move tmux'd Claude sessions (gh-style)
+# The single front door (replacing the dev/tpush/tpop/tbeam/tread/tplan/tpaste/
+# tfind/on family). This zsh function is the thin SHIM over the bin/t executable:
+#   • bin-native verbs (ls, read, plan, paste, kill, on, beam orchestration, and the
+#     internal session-rows/land/kill-owner) run straight through via `command t`
+#     (the `command` builtin reaches ~/bin/t past this function, dodging the
+#     name collision — same trick the claude() wrapper uses).
+#   • shell-bound verbs (open/fg/pop/push/find) map to the existing zsh functions,
+#     which ALREADY do the cd + `claude -r` in the current terminal and the tpush
+#     sentinel handoff correctly *because they run in the calling shell* — a bin
+#     subprocess cannot. No resolve protocol is needed: the shim just calls them.
+# `t <verb> -h` always shows the bin's gh-style help (forwarded below). Full per-verb
+# help + the verb list live in bin/t.
+t() {
+  emulate -L zsh
+  # -h/--help anywhere (and the bare `t`) → the bin's gh-style help/usage.
+  local a
+  for a in "$@"; do [[ $a == -h || $a == --help ]] && { command t "$@"; return; }; done
+  local verb="$1"
+  [[ -z $verb ]] && { command t; return; }
+  shift
+  case "$verb" in
+    open)  _t_open "$@" ;;            # → dev / dev -r / dev … --here (tmux or -f)
+    fg)    dev "$1" fg ;;             # → _dev_adopt_fg (foreground resume here)
+    pop)   tpop "$@" ;;               # → cd + claude -r in THIS terminal
+    push)  tpush "$@" ;;              # → sentinel handoff; claude() wrapper spawns post-exit
+    find)  tfind "$@" ;;              # → rank/pick then cd + claude -r here
+    beam)  _t_beam "$@" ;;            # → tbeam (host moves from --host to a positional)
+    *)     command t "$verb" "$@" ;;  # ls/read/plan/paste/kill/on/session-rows/land/kill-owner
+  esac
+}
+
+# _t_open — map gh-grammar `t open <repo> [slot] [--new|--fg|--remote|--here]` onto
+# the existing `dev` grammar: --new→the `new` slot keyword, --fg→-f, --remote→-r;
+# repo/slot/-r/--here/-f pass through (dev parses flags in any position).
+_t_open() {
+  local -a a; local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --new)    a+=(new) ;;
+      --fg)     a+=(-f) ;;
+      --remote) a+=(-r) ;;
+      *)        a+=("$arg") ;;
+    esac
+  done
+  dev "${a[@]}"
+}
+
+# _t_beam — map gh-grammar `t beam [repo] [slot] [--host H] [flags]` onto tbeam's
+# `[repo [slot]] [host]` positional grammar (host moves to the end); tbeam's own
+# -f/--fg/-d/-p/-a/-s flags pass through unchanged.
+_t_beam() {
+  local -a a; local arg host want_host=
+  for arg in "$@"; do
+    if [[ -n $want_host ]]; then host=$arg; want_host=; continue; fi
+    case "$arg" in
+      --host) want_host=1 ;;
+      *)      a+=("$arg") ;;
+    esac
+  done
+  tbeam "${a[@]}" ${host:+"$host"}
+}
+
 # help — show this command list, grouped by purpose
 # Each command's name + description are parsed live from the leading
 # `# name … — description` comment above each ~/.zshrc function and the header
