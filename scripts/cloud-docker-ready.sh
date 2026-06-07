@@ -14,14 +14,18 @@ set -euo pipefail
 # what makes fail-closed local scans see the current denylist. When the secret
 # is unset/empty, remove any previously-materialized file so a revoked secret
 # reverts to the documented fail-open behavior instead of leaving a stale
-# denylist on disk across cached install snapshots.
+# denylist on disk across cached install snapshots. A sibling .from-secret
+# marker records provenance so we never delete a hand-maintained local denylist
+# (the documented macOS path).
 if [[ -n "${PII_SCRUB_RULES:-}" ]]; then
   mkdir -p "$HOME/.config/pii-scan"
   printf '%s' "$PII_SCRUB_RULES" > "$HOME/.config/pii-scan/scrub-rules.json"
   chmod 600 "$HOME/.config/pii-scan/scrub-rules.json"
+  : > "$HOME/.config/pii-scan/scrub-rules.json.from-secret"
   echo "cloud-docker-ready: materialized PII denylist -> $HOME/.config/pii-scan/scrub-rules.json"
-elif [[ -f "$HOME/.config/pii-scan/scrub-rules.json" ]]; then
-  rm -f "$HOME/.config/pii-scan/scrub-rules.json"
+elif [[ -f "$HOME/.config/pii-scan/scrub-rules.json.from-secret" ]]; then
+  rm -f "$HOME/.config/pii-scan/scrub-rules.json" \
+        "$HOME/.config/pii-scan/scrub-rules.json.from-secret"
   echo "cloud-docker-ready: removed stale PII denylist -> $HOME/.config/pii-scan/scrub-rules.json (PII_SCRUB_RULES unset)"
 fi
 
