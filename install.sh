@@ -129,11 +129,17 @@ echo "Set core.hooksPath -> .githooks (PII pre-commit guard)"
 
 # Materialize the private PII denylist when supplied (Cloud Agents / CI parity).
 # Set PII_SCRUB_RULES to the scrub-rules.json contents in the agent environment.
+# When the secret is unset/empty, remove any previously-materialized file so a
+# revoked secret reverts to the documented fail-open behavior instead of leaving
+# a stale denylist on disk.
 if [[ -n "${PII_SCRUB_RULES:-}" ]]; then
     mkdir -p "$HOME/.config/pii-scan"
     printf '%s' "$PII_SCRUB_RULES" > "$HOME/.config/pii-scan/scrub-rules.json"
     chmod 600 "$HOME/.config/pii-scan/scrub-rules.json"
     echo "Materialized PII denylist -> $HOME/.config/pii-scan/scrub-rules.json"
+elif [[ -f "$HOME/.config/pii-scan/scrub-rules.json" ]]; then
+    rm -f "$HOME/.config/pii-scan/scrub-rules.json"
+    echo "Removed stale PII denylist -> $HOME/.config/pii-scan/scrub-rules.json (PII_SCRUB_RULES unset)"
 fi
 
 # Periodic csync is handled by a precmd hook in .zshrc (linked above), not a

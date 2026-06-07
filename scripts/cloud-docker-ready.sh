@@ -11,12 +11,18 @@ set -euo pipefail
 # Mirrors the block in install.sh, but runs per-boot so secret rotation works
 # even when the install snapshot is cached. pii-scan reads PII_RULES / the
 # default file path, not $PII_SCRUB_RULES directly — so the on-disk write is
-# what makes fail-closed local scans see the current denylist.
+# what makes fail-closed local scans see the current denylist. When the secret
+# is unset/empty, remove any previously-materialized file so a revoked secret
+# reverts to the documented fail-open behavior instead of leaving a stale
+# denylist on disk across cached install snapshots.
 if [[ -n "${PII_SCRUB_RULES:-}" ]]; then
   mkdir -p "$HOME/.config/pii-scan"
   printf '%s' "$PII_SCRUB_RULES" > "$HOME/.config/pii-scan/scrub-rules.json"
   chmod 600 "$HOME/.config/pii-scan/scrub-rules.json"
   echo "cloud-docker-ready: materialized PII denylist -> $HOME/.config/pii-scan/scrub-rules.json"
+elif [[ -f "$HOME/.config/pii-scan/scrub-rules.json" ]]; then
+  rm -f "$HOME/.config/pii-scan/scrub-rules.json"
+  echo "cloud-docker-ready: removed stale PII denylist -> $HOME/.config/pii-scan/scrub-rules.json (PII_SCRUB_RULES unset)"
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
