@@ -79,8 +79,6 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Materialize denylist from secret
         env:

@@ -81,8 +81,8 @@ MCP is two separate things:
   to your Anthropic account and sync automatically when you log in on a new machine.
   There is nothing to copy.
 - **Local/stdio MCP servers** live inside `~/.claude.json`, which is a stateful file
-  (OAuth tokens, project history, caches) and is **not** symlinked. We have none today.
-  If you add one, sync it with a merge step rather than committing `~/.claude.json`.
+  (OAuth tokens, project history, caches) and is **not** symlinked. If you add one,
+  sync it with a merge step rather than committing `~/.claude.json`.
 
 ## PII guard
 
@@ -130,7 +130,7 @@ Clone the repo anywhere — `install.sh` is location-independent (it resolves it
 path), so the symlink *targets* follow wherever you checked it out:
 
 ```sh
-git clone git@github.com:chrisjob1021/dotfiles.git path/to/dotfiles
+git clone git@github.com:chrisobrien-ai/dotfiles.git path/to/dotfiles
 path/to/dotfiles/install.sh
 ```
 
