@@ -1236,7 +1236,14 @@ _t_dev() {
       fi
       (( n++ ))
     done
-    [[ -z $slot ]] && slot=${free:-$n}    # nothing to reattach → first free gap (or next slot if all 20 are live)
+    if [[ -z $slot ]]; then
+      if [[ -n $free ]]; then
+        slot=$free                                                 # nothing to reattach → first free gap
+      else
+        while tmux has-session -t "dev-${repo}-${n}" 2>/dev/null; do (( n++ )); done
+        slot=$n                                                    # all 1..20 live → next never-used slot (unbounded)
+      fi
+    fi
   fi
 
   local session="dev-${repo}-${slot}"
