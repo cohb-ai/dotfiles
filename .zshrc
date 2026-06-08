@@ -1219,22 +1219,24 @@ _t_dev() {
     slot=$n
   fi
 
-  # auto-pick slot: find a free or unattached slot, or create the next one
+  # auto-pick slot: REATTACH to the lowest-numbered existing-but-unattached
+  # session before ever spawning a fresh one. A free *gap* (e.g. slot 1 was
+  # killed, leaving 2 live) is only a fallback — so `t open <repo>` lands on the
+  # session that's actually there (slot 2) instead of creating a new slot 1.
+  # Bounded scan (free is a non-breaking fallback now, so `while true` would
+  # spin past the highest slot forever); 20 matches the cap `t paste`/`t kill` use.
   if [[ -z "$slot" ]]; then
-    local n=1
-    while true; do
+    local n=1 free=
+    while (( n <= 20 )); do
       local sname="dev-${repo}-${n}"
       if ! tmux has-session -t "$sname" 2>/dev/null; then
-        # free slot — use it
-        slot=$n
-        break
+        [[ -z $free ]] && free=$n                                  # first free gap → fallback
       elif ! tmux list-clients -t "$sname" 2>/dev/null | grep -q .; then
-        # exists but not attached — reattach
-        slot=$n
-        break
+        slot=$n; break                                            # existing + unattached → reattach (wins)
       fi
       (( n++ ))
     done
+    [[ -z $slot ]] && slot=${free:-$n}    # nothing to reattach → first free gap (or next slot if all 20 are live)
   fi
 
   local session="dev-${repo}-${slot}"
