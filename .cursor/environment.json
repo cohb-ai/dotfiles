@@ -1,0 +1,10 @@
+{
+  "$schema": "https://cursor.com/schemas/environment.schema.json",
+  "name": "dotfiles (Linux CI parity)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "install": "./install.sh && ./scripts/cloud-docker-ready.sh",
+  "start": "./scripts/cloud-docker-ready.sh"
+}
