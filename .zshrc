@@ -160,8 +160,8 @@ dots() {
   local dotdir="${${:-$HOME/.zshrc}:A:h}"
   cd "$dotdir" || return
 
-  local g c y r0=
-  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; r0=$'\e[0m'; fi
+  local g c y b r0=
+  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; b=$'\e[1m'; r0=$'\e[0m'; fi
 
   if [[ "$1" == --dev || "$1" == -d ]]; then
     # Install from the current branch: relink (catches new files), no git, no brew.
@@ -666,7 +666,7 @@ _dev_pid_for_sid() {
 # foreground claude is bound to its own terminal (no tmux to attach to), so the only
 # way to "get into it" from elsewhere is to stop that owner and resume the conversation
 # in THIS terminal — matching how it is running (the tmux-slot analog is `t open <repo>
-# <slot>` / `… --here`). One-live-owner: Claude takes no transcript lock, so two live
+# <slot>` / `t beam … --from`). One-live-owner: Claude takes no transcript lock, so two live
 # resumers of one id diverge — hence the SIGTERM-then-wait before `claude -r`, mirroring
 # t pop. Only :fg rows whose id the registry recorded (sid != `-`) are resumable; a
 # pre-registry one must be reattached from its own terminal.
@@ -773,8 +773,8 @@ _dev_list() {
     echo "No dev sessions running${scope:+ in ${scope:t} (dev ls --all for every repo)}."
     return 0
   fi
-  local g c y r0=
-  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; r0=$'\e[0m'; fi
+  local g c y b r0=
+  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; b=$'\e[1m'; r0=$'\e[0m'; fi
   # widest name (dev slot sans dev-, plus foreground "<repo>:fg" labels) so WORKING ON lines up
   local s short name_w=7
   while IFS= read -r s; do [[ -n $s ]] || continue; short="${s#dev-}"; (( ${#short} > name_w )) && name_w=${#short}; done <<< "$names"
@@ -783,7 +783,7 @@ _dev_list() {
   # prefix before the summary = 2 (indent) + 8 (STATUS field) + name_w + 1 (gap)
   local avail=$(( ${COLUMNS:-80} - 11 - name_w ))
   (( avail < 12 )) && avail=$(( 80 - 11 - name_w ))
-  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context${scope:+   ${y}(repo: ${scope:t} — --all for all)${r0}}"
+  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context${scope:+   ${y}(repo: ${r0}${b}${c}${scope:t}${r0}${y} — --all for all)${r0}}"
   print -r -- ""
   printf '  %s%-8s%-*s %s%s\n' "$y" 'STATUS' $name_w 'SESSION' 'WORKING ON' "$r0"
   local state dir amark cmark summary
@@ -922,9 +922,9 @@ _dev_rows_all() {
 # WORKING ON). A row on THIS machine leaves HOST *blank* (so "here" reads as absence,
 # not a peer host named `local`) while remote rows show their $REMOTE_HOSTS key — that
 # is the local/host disambiguation, and `local` never widens the column. A trailing
-# reattach footer spells out the three verbs (`dev <repo> <slot>` here, `dev -r …` on
-# its host, `--here` to pull). Read-only; to actually pull a remote one down, `dev -r
-# <repo> <slot> --here`.
+# footer spells out the two verbs: `t open <repo> <slot>` (auto-attaches it in place on
+# its host) and `t beam <repo> <slot> --from <host>` (pulls it down here — a move).
+# Read-only itself.
 _dev_list_remote() {
   local scope="$1"
   local rows; rows=$(_dev_rows_all)
@@ -935,8 +935,8 @@ _dev_list_remote() {
     echo "No dev sessions running${scope:+ in ${scope:t} (dev ls -r --all for every repo)}${scope:+,} on this machine or any reachable host."
     return 0
   fi
-  local g c y r0=
-  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; r0=$'\e[0m'; fi
+  local g c y b r0=
+  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; b=$'\e[1m'; r0=$'\e[0m'; fi
   # widest HOST and SESSION cells so both columns line up (headers are the floor:
   # "HOST"=4, "SESSION"=7). HOST is its own column, SESSION stays the bare slot.
   local host sid cwd slot state context summary host_w=4 name_w=7
@@ -948,7 +948,7 @@ _dev_list_remote() {
   # prefix before WORKING ON = 2 indent + 8 STATUS + host_w + 1 gap + name_w + 1 gap
   local avail=$(( ${COLUMNS:-80} - 12 - host_w - name_w ))
   (( avail < 12 )) && avail=$(( 80 - 12 - host_w - name_w ))
-  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context${scope:+   ${y}(repo: ${scope:t} — --all for all)${r0}}"
+  print -r -- "dev sessions   ${g}●${r0} attached · ${c}✓${r0} active context${scope:+   ${y}(repo: ${r0}${b}${c}${scope:t}${r0}${y} — --all for all)${r0}}"
   print -r -- ""
   printf '  %s%-8s%-*s %-*s %s%s\n' "$y" 'STATUS' $host_w 'HOST' $name_w 'SESSION' 'WORKING ON' "$r0"
   local amark cmark hostcell
@@ -960,10 +960,11 @@ _dev_list_remote() {
     hostcell=$host; [[ $host == local ]] && hostcell=
     printf '  %s %s     %-*s %-*s %s%s%s\n' "$amark" "$cmark" $host_w "$hostcell" $name_w "$slot" "$y" "$summary" "$r0"
   done <<< "$rows"
-  # reattach legend: tmux slots pull here with --here; a foreground (:fg) row is bound
-  # to its terminal, so it is reattached on its host via `on <host> dev <repo> fg`
-  # (shown only when a :fg row is present — slot is field 4 of the prefixed rows).
-  local foot="reattach: t open <repo> <slot> · on host: t open <repo> <slot> --remote · pull: --here"
+  # reattach legend: `t open` auto-attaches a slot on its host; `t beam … --from <host>`
+  # pulls it here (a move). A foreground (:fg) row is bound to its terminal, so it is
+  # reattached on its host via `on <host> dev <repo> fg` (shown only when a :fg row is
+  # present — slot is field 4 of the prefixed rows).
+  local foot="attach (auto-finds its host): t open <repo> <slot> · pull here: t beam <repo> <slot> --from <host>"
   print -r -- "$rows" | awk -F'\t' '$4 ~ /:/{f=1} END{exit !f}' \
     && foot+=" · foreground: t on <host> t fg <id>"
   print -r -- ""
@@ -1076,7 +1077,7 @@ _dev_new_session() {
 # dev — open/reattach a Claude Code tmux session (local or on another host)
 #
 # Usage: dev <repo> [slot|new] [-f]
-#        dev -r [repo [slot]] [--here]
+#        dev -r [repo [slot]]
 #
 # Commands:
 #   dev <repo> [slot|new]        open/reattach (slot 1-4, or 'new' to force fresh)
@@ -1094,17 +1095,19 @@ _dev_new_session() {
 #   -f, --fg     no tmux: foreground-RESUME the named slot if it's live (≡ tpop),
 #                else git setup + a fresh claude inline (alias: --no-tmux)
 #   -y, --yes    dev kill: skip the "Claude is live" confirm (alias: --force)
-#   -r, --remote  act on a slot live on another $REMOTE_HOSTS host, host inferred:
-#                 attach in place; with `ls` list every host; with `kill` kill it there
-#   --here       with -r: PULL the remote session down to THIS machine into a local
-#                dev slot instead of attaching in place (implies -r)
+#                A slot that is not live HERE but is live on a $REMOTE_HOSTS host is
+#                found automatically and attached IN PLACE there (host inferred) — no
+#                flag needed; a live LOCAL slot always wins. open never MOVES a session
+#                between machines — that is `tbeam` (send) / `tbeam --from` (receive).
+#   -r, --remote  FORCE the remote branch even when a local slot exists; with `ls`
+#                 list every host; with `kill` kill it there; bare `t open -r` picks
 #
 # repo is a key of DEV_REPOS (configured in ~/.zshrc.local). The checked-out branch
 # is per-repo (DEV_BRANCHES[repo], else $DEV_BRANCH). dev kill matches session names,
 # so it also reaches orphaned sessions whose repo alias is gone (dev kill dotfiles 1).
 # Surveying what's live everywhere is `dev ls -r`; sending a session away is `tbeam`.
 _t_dev() {
-  local no_tmux= force= remote= here= all=
+  local no_tmux= force= remote= all=
   local -a pos
   local arg
   # -f/--fg = foreground/no-tmux EVERYWHERE (matches tbeam -f). The kill-confirm
@@ -1117,7 +1120,6 @@ _t_dev() {
       -f|--fg|--no-tmux) no_tmux=1 ;;
       -y|--yes|--force)  force=1 ;;
       -r|--remote)       remote=1 ;;
-      --here)            here=1 ;;
       -a|--all)          all=1 ;;
       *)                 pos+=("$arg") ;;
     esac
@@ -1149,14 +1151,29 @@ _t_dev() {
     return
   fi
 
-  # `dev -r <repo> [slot]` — act on a slot that's live on another machine, with the
-  # host AUTO-INFERRED from $REMOTE_HOSTS (no host to type). -r attaches in place;
-  # --here pulls it down (and implies -r — "bring it here" is inherently remote).
-  # -f forwards (inline attach there / fg resume on pull). `dev -r ls` already went
-  # to the cross-host list above, so by here a remote <repo> is meant.
-  if [[ -n $remote || -n $here ]]; then
-    _dev_remote "$repo" "$slot" "$here" "$no_tmux"
+  # Remote-aware open: a slot can live on THIS machine or another, and `t open` finds
+  # it wherever it is and ATTACHES IN PLACE (the session stays put — moving it between
+  # machines is `t beam`'s job, not open's). A live LOCAL slot always wins (cheap tmux
+  # check — no ssh). When the named slot is NOT live here, the AUTO path probes
+  # $REMOTE_HOSTS (host inferred, _dev_remote_resolve): live there → attach over ssh -t;
+  # live nowhere → fall through to the local path (fresh start). The auto-probe is
+  # skipped when no hosts are configured, for an explicit fresh/foreground request
+  # (new/fg/-f), and outside DEV_REPOS (an unknown repo errors locally below). -r/--remote
+  # FORCES the remote branch regardless of a local slot — and covers the bare `t open -r`
+  # picker. To bring a remote session HERE (a move), use `t beam <repo> <slot> --from <host>`.
+  if [[ -n $remote ]]; then
+    _dev_remote "$repo" "$slot" "$no_tmux"     # explicit -r: force attach in place on its host
     return
+  fi
+  if (( ${#REMOTE_HOSTS} )) && [[ -z $no_tmux && -n $repo && -n ${DEV_REPOS[$repo]} \
+        && $slot != new && $slot != fg ]] && ! _dev_local_slot_live "$repo" "$slot"; then
+    local res; res=$(_dev_remote_resolve "$repo" "$slot" 2>/dev/null)   # quiet probe
+    if [[ -n $res ]]; then
+      echo "(not live here — attaching on ${res%%$'\t'*}; Ctrl-b d to detach)"
+      _dev_remote_attach "$res" "$no_tmux"
+      return
+    fi
+    # nothing live remotely either → fall through to the local path (fresh start)
   fi
 
   # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
@@ -1172,7 +1189,8 @@ _t_dev() {
       print -r -- "Commands:"
       print -r -- "  t open <repo> [slot]        open/reattach (slot 1-4, --new to force fresh)"
       print -r -- "  t open <repo> [slot] --fg   no tmux: foreground-resume / run inline"
-      print -r -- "  t open <repo> [slot] --remote   attach a slot live on another host (--here pulls)"
+      print -r -- "  t open <repo> [slot]        auto-attaches on another host if the slot is live there"
+      print -r -- "  t beam <repo> [slot] --from <host>   pull that session HERE (move); omit --from to send"
       print -r -- "  t ls [-r] [-a]              list sessions (attached + active context)"
       print -r -- "  t kill <repo> <slot|all>    tear down a session (-y to skip the confirm)"
       print -r -- "  t -h                        full verb list + per-verb help"
@@ -1292,7 +1310,8 @@ _t_dev() {
 # summary; needs a TTY+fzf, else it lists them and returns 1); none → return 1 with a
 # `dev ls -r` hint. The chosen slot name "<repo>-<num>" is split on the LAST dash
 # (repos like `dotfiles` have none) so the repo+slot come back fully resolved. Shared
-# by `dev -r` (attach/pull) and `dev -r kill`. Diagnostics → stderr (stdout is captured).
+# by `t open` (explicit -r and the auto-detect attach) and `dev -r kill`. Diagnostics
+# → stderr (stdout is captured).
 _dev_remote_resolve() {
   local repo="$1" slot="$2"
   # _dev_rows_all columns: host(1) sid(2) cwd(3) slot(4) state(5) context(6) summary(7)
@@ -1336,25 +1355,44 @@ _dev_remote_resolve() {
 # clears it so process tracking resumes. No-op when stdout is not a tty (cmd | cat).
 _term_title() { [[ -t 1 ]] && printf '\e]0;%s\a' "$1" }
 
-# _dev_remote <repo> <slot> <here> <fg> — `dev -r [repo [slot]]` (and `dev <repo> …
-# --here`): resolve a live REMOTE slot (host auto-inferred, _dev_remote_resolve) and
-# either ATTACH IN PLACE on that host (default — ssh -t + remote `dev`, session stays
-# put, the old `tgo`) or, with <here>, PULL it down to THIS machine (_dev_pull, the
-# move tbeam --here did). `zsh -lic` for the usual reason (Homebrew/tmux login PATH,
-# claude interactive PATH). <fg> forwards `-f` (inline there / fg resume on a pull).
+# _dev_local_slot_live <repo> <slot> — true if a dev-<repo>-<slot> tmux session is
+# live on THIS machine (any dev-<repo>-* when <slot> is empty). Cheap (tmux only, no
+# ssh): the gate that lets `t open` prefer a local slot before paying for a remote
+# probe. The new/fg keywords are never "a live slot" (they mean fresh / foreground).
+_dev_local_slot_live() {
+  local repo="$1" slot="$2"
+  [[ -n $repo ]] || return 1
+  if [[ -n $slot && $slot != new && $slot != fg ]]; then
+    tmux has-session -t "dev-${repo}-${slot}" 2>/dev/null
+  else
+    tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -q "^dev-${repo}-"
+  fi
+}
+
+# _dev_remote <repo> <slot> <fg> — `dev -r [repo [slot]]`: resolve a live REMOTE slot
+# (host auto-inferred, _dev_remote_resolve) then ATTACH IN PLACE on its host. The
+# explicit `-r` entry — `t open` also auto-detects a remote slot when none is live
+# locally and calls _dev_remote_attach directly with an already-resolved row (no second
+# scan). Moving a session between machines is `tbeam`, not this. <fg> forwards `-f`.
 _dev_remote() {
-  local repo="$1" slot="$2" here="$3" fg="$4"
+  local repo="$1" slot="$2" fg="$3"
   local res; res=$(_dev_remote_resolve "$repo" "$slot") || return 1
+  _dev_remote_attach "$res" "$fg"
+}
+
+# _dev_remote_attach <res> <fg> — ATTACH IN PLACE on an already-resolved remote slot
+# ("<host>\t<repo>\t<slot>", from _dev_remote_resolve): ssh -t + remote `t open`, so the
+# session stays put on its host (the old `tgo`). `zsh -lic` for the usual reason
+# (Homebrew/tmux login PATH, claude interactive PATH). <fg> forwards `-f`. Shared by the
+# explicit `_dev_remote` entry and `t open`'s auto-detect path (slot resolved once).
+_dev_remote_attach() {
+  local res="$1" fg="$2"
   local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
   local target="${REMOTE_HOSTS[$host]:-$host}"
 
-  if [[ -n $here ]]; then
-    _dev_pull "$host" "$target" "$prepo" "$pslot" "$fg"
-    return
-  fi
   if [[ ! -t 1 ]]; then
     echo "dev: attaching to a remote session needs a terminal." >&2
-    echo "  From a terminal: t open $prepo $pslot --remote   (or --here to pull it local)" >&2
+    echo "  From a terminal: t open $prepo $pslot   (it attaches on $host; \`t beam $prepo $pslot --from $host\` pulls it here)" >&2
     return 1
   fi
   echo "→ Attaching $host:dev-${prepo}-${pslot} (stays on $host; Ctrl-b d to detach)"
@@ -1383,8 +1421,8 @@ _dev_remote_kill() {
 }
 
 # _dev_pull <host> <target> <repo> <slot> <fg> — pull a remote dev slot's session
-# onto THIS machine and land it (the engine behind `dev -r <repo> <slot> --here`; absorbed
-# the old `tbeam --here`). Finds the live dev-<repo>-<slot> on <host> via its
+# onto THIS machine and land it (the engine behind `tbeam <repo> <slot> --from <host>` —
+# the RECEIVE direction, mirror of the default send). Finds the live dev-<repo>-<slot> on <host> via its
 # _dev_session_rows (sid + cwd; slot omitted → the repo's first live slot), rsync's
 # the transcript back, then stops the origin copy there (the MOVE — _tbeam_kill_owner,
 # so exactly one live claude owns the id) and resumes it locally: a dev-<repo>-<slot>
@@ -1688,7 +1726,7 @@ PY
 # _claude_session_rows [cwd] [query] — scan saved Claude transcripts, printing
 # one "<session-id>\t<cwd>\t<display>" row per session to stdout (no fzf — see
 # _claude_sessions_fzf for the picker). Split out so the rows can be generated on
-# a *remote* host over ssh and fzf'd locally (tbeam --here): fzf can't be driven
+# a *remote* host over ssh and fzf'd locally (tbeam --from): fzf can't be driven
 # interactively through a captured ssh pipe, but a row dump travels fine.
 # Newest-first by transcript mtime; the JSONL is parsed once in
 # python for each file's real cwd (the `cwd` field, not the lossy folder name),
@@ -2143,7 +2181,7 @@ _tbeam_sync_transcript() {
 
 # _tbeam_pull_transcript <cwd> <host> — the mirror of _tbeam_sync_transcript: pull
 # a session's transcript dir FROM <host> down to here before it's resumed locally
-# (tbeam --here). Same conflict policy — rsync --update, no --delete — only the
+# (tbeam --from). Same conflict policy — rsync --update, no --delete — only the
 # direction flips, so the freshest copy of each file survives whichever way the
 # beam flows.
 _tbeam_pull_transcript() {
@@ -2214,9 +2252,10 @@ _tbeam_land() {
   print -r -- "$session"                        # last line: caller reads it for the hint
 }
 
-# tbeam — send a Claude session to another machine (default: $TBEAM_HOST)
+# tbeam — move a Claude session between machines (send by default; --from receives)
 #
 # Usage: tbeam [flags] [repo [slot]] [host]
+#        tbeam <repo> [slot] --from <host>        (pull a session HERE)
 #
 # Arguments:
 #   repo        a DEV_REPOS key → beam that dev slot's session (like tpop/tplan);
@@ -2226,6 +2265,8 @@ _tbeam_land() {
 #               read as a host only when it isn't a DEV_REPOS key.
 #
 # Options:
+#   --from <host>       RECEIVE: pull <repo> [slot] from <host> onto THIS machine
+#                       (the mirror of the default send; repo required)
 #   -f, --fg            resume in the foreground, no tmux slot (dies if the shell
 #                       drops; needs a terminal, so not usable from inside Claude)
 #   -d, --detach        leave it running on <host>, just print how to attach
@@ -2233,17 +2274,18 @@ _tbeam_land() {
 #   -a, --all           picker across every project
 #   -s, --session <id>  target a session by id or unique prefix, not the picker
 #
-# Like tpush, but across machines — and a MOVE, not a copy: after the session lands
-# on the far side, the origin's live owner is stopped so exactly one claude owns the
-# id (the same invariant tpush/tpop protect). tbeam only PUSHES — it sends THIS
-# conversation (or an fzf pick) to <host>, lands it in a detached dev slot there, and
-# ssh's you in. (To pull the OTHER way — summon a session that lives on a host down
-# to here — use `dev <host> <repo> <slot> --here`.) The repo must exist at the same
-# ~/code path on both; the transcript is rsync'd before it resumes.
+# Like tpush, but across machines — and a MOVE, not a copy: after the session lands on
+# the far side, the origin's live owner is stopped so exactly one claude owns the id
+# (the same invariant tpush/tpop protect). Both directions are here: by default tbeam
+# SENDS THIS conversation (or an fzf pick) to <host>, lands it in a detached dev slot,
+# and ssh's you in; `--from <host>` RECEIVES — pulls a session that lives on <host> down
+# into a local dev slot. (To merely ATTACH a remote slot without moving it, use `t open
+# <repo> <slot>` — it auto-finds and attaches in place on its host.) The repo must exist
+# at the same ~/code path on both; the transcript is rsync'd before it resumes.
 _t_beam() {
   # while/shift (not for-in) so -s/--session can consume the following token as
   # its value; the `=`-joined forms (-s=… / --session=…) work too.
-  local fg= detach= pick= all= host= sid_arg=
+  local fg= detach= pick= all= host= sid_arg= from_host=
   local -a pos=()
   while (( $# )); do
     case "$1" in
@@ -2254,18 +2296,37 @@ _t_beam() {
       -a|--all)             pick=1; all=1 ;;
       -s|--session|--id)    shift; sid_arg="$1" ;;
       -s=*|--session=*|--id=*) sid_arg="${1#*=}" ;;
+      --from)               shift; from_host="$1" ;;
+      --from=*)             from_host="${1#*=}" ;;
       -*)                   echo "tbeam: unknown flag $1" >&2; return 1 ;;
       *)                    pos+=("$1") ;;
     esac
     shift
   done
 
+  # RECEIVE: --from <host> pulls a session FROM that host onto THIS machine — the exact
+  # mirror of the default send, and a MOVE for the same one-live-owner reason (_dev_pull
+  # stops the origin copy on <host> once the transcript lands here). Positionals are
+  # [repo [slot]] only (the host is named by --from, never a positional); the repo is
+  # required (it names which remote slot to pull). -f resumes inline here instead of in
+  # a detached dev slot — but inside Claude there is no TTY to attach, so force a slot.
+  if [[ -n $from_host ]]; then
+    command -v rsync >/dev/null 2>&1 || { echo "tbeam: rsync not found" >&2; return 1; }
+    local repo_arg=${pos[1]} slot_arg=
+    [[ ${pos[2]} == <-> ]] && slot_arg=${pos[2]}
+    [[ -n $repo_arg ]] || { echo "tbeam: --from needs a <repo> to pull (e.g. t beam dot 1 --from $from_host)" >&2; return 1; }
+    [[ -n $CLAUDE_CODE_SESSION_ID ]] && fg=
+    local target="${REMOTE_HOSTS[$from_host]:-$from_host}"
+    _dev_pull "$from_host" "$target" "$repo_arg" "$slot_arg" "$fg"
+    return
+  fi
+
   # Positional grammar: [repo [slot]] [host], matching the dev/tplan/tpop family so
   # `tbeam api 1` lines up with `tpop api 1`. The first positional is a <repo> only
   # when it's a DEV_REPOS key — that's what disambiguates it from a bare host
   # (`tbeam mini` still means host 'mini'). An optional numeric slot follows, then
-  # an optional explicit host. (To go the OTHER way — pull a session FROM a host
-  # onto this machine — that's `dev <host> <repo> <slot> --here` now, not tbeam.)
+  # an optional explicit host. (This is the SEND path; the OTHER way — pull a session
+  # FROM a host onto this machine — is `--from <host>`, handled just above.)
   local repo_arg= slot_arg=
   if [[ -n ${pos[1]} && -n ${DEV_REPOS[${pos[1]}]} ]]; then
     repo_arg=${pos[1]}
@@ -2384,7 +2445,7 @@ _t_beam() {
   local rest=${session#dev-} repo slot
   slot=${rest##*-}; repo=${rest%-*}
   if [[ -n "${DEV_REPOS[$repo]}" ]]; then
-    echo "  Attach: dev -r $repo $slot    (or pull it back: dev -r $repo $slot --here)"
+    echo "  Attach: t open $repo $slot    (or pull it back: t beam $repo $slot --from $host)"
   else
     echo "  Attach: ssh $host -t \"zsh -lic 'tmux attach -t $session'\""
   fi
@@ -2433,7 +2494,7 @@ t() {
   [[ -z $verb ]] && { command t; return; }
   shift
   case "$verb" in
-    open)  _t_open "$@" ;;            # → _t_dev / -r / … --here (tmux or -f)
+    open)  _t_open "$@" ;;            # → _t_dev (local / -r remote attach / auto-detect / -f)
     fg)    _dev_adopt_fg "$1" ;;      # foreground resume here; no repo → auto-resolve
     pop)   _t_pop "$@" ;;             # → cd + claude -r in THIS terminal
     push)  _t_push "$@" ;;            # → sentinel handoff; claude() wrapper spawns post-exit
@@ -2443,9 +2504,9 @@ t() {
   esac
 }
 
-# _t_open — map gh-grammar `t open <repo> [slot] [--new|--fg|--remote|--here]` onto
-# the existing `dev` grammar: --new→the `new` slot keyword, --fg→-f, --remote→-r;
-# repo/slot/-r/--here/-f pass through (dev parses flags in any position).
+# _t_open — map gh-grammar `t open <repo> [slot] [--new|--fg|--remote]` onto the
+# existing `dev` grammar: --new→the `new` slot keyword, --fg→-f, --remote→-r;
+# repo/slot/-r/-f pass through (dev parses flags in any position).
 _t_open() {
   local -a a; local arg
   for arg in "$@"; do
@@ -2460,8 +2521,9 @@ _t_open() {
 }
 
 # _t_beam_xlate — map gh-grammar `t beam [repo] [slot] [--host H] [flags]` onto the
-# _t_beam impl's `[repo [slot]] [host]` positional grammar (host moves to the end);
-# its own -f/--fg/-d/-p/-a/-s flags pass through unchanged.
+# _t_beam impl's `[repo [slot]] [host]` positional grammar (--host's value moves to the
+# end as the trailing host positional); -f/--fg/-d/-p/-a/-s and --from <h> (the receive
+# flag) pass through unchanged — _t_beam parses --from itself.
 _t_beam_xlate() {
   local -a a; local arg host want_host=
   for arg in "$@"; do
@@ -2611,7 +2673,7 @@ _t() {
     open|fg|kill|read|plan|paste|beam)
       if   (( CURRENT == 3 )); then _values 'repo' ${(k)DEV_REPOS}
       elif (( CURRENT == 4 )); then _values 'slot' 1 2 3 4 new
-      else _values 'flag' --new --fg --remote --here -y --yes -a --all --host -d --detach -p --pick -s --session -h --help; fi ;;
+      else _values 'flag' --new --fg --remote -y --yes -a --all --host --from -d --detach -p --pick -s --session -h --help; fi ;;
     on)
       (( CURRENT == 3 )) && _values 'host' ${(k)REMOTE_HOSTS} || _normal ;;
     ls)
