@@ -94,15 +94,15 @@ hint. Output is self-contained — plain ANSI, colored only on a terminal.
 ## Claude plugins & MCP
 
 Claude settings install as a **real copy**, never clobbering an existing
-`~/.claude/settings.json`. Two templates:
+`~/.claude/settings.json`. The seed is **`settings.json.example`** — conservative:
+only the session-stamping hook the tmux tooling needs; you approve Bash yourself.
 
-- **`settings.json.example`** (default) — conservative: only the session-stamping
-  hook the tmux tooling needs; you approve Bash yourself.
-- **`settings.json`** (author's) — tuned config: `enabledPlugins`,
-  `extraKnownMarketplaces`, `"defaultMode": "auto"`, `skipAutoPermissionPrompt`,
-  and a Bash allowlist. Opt in at install time (choice 2) or later with
-  `CLAUDE_SETTINGS=author ./install.sh`. Symlinking it reproduces plugins on a new
-  machine (Claude re-clones marketplaces on first run).
+The live file is **per-machine and untracked by design**: Claude Code writes to
+it at runtime (`/model` saves your default model, "always allow" appends
+permission rules, plugin toggles land there), so tracking or symlinking it keeps
+the repo dirty and risks committing private allow-rules. An earlier version
+shipped the author's tuned config as a symlink option; `install.sh` now
+materializes such a legacy symlink into a real copy and the path is gitignored.
 
 MCP is two separate things:
 

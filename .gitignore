@@ -15,3 +15,8 @@ __pycache__/
 # here. pii-scan reads it from ~/.config/pii-scan/ locally and from the
 # PII_SCRUB_RULES secret in CI.
 scrub-rules.json
+
+# Claude Code settings are per-machine: Claude writes to the live file at runtime
+# (/model saves, "always allow" permission rules, plugin toggles), so only
+# settings.json.example is tracked. Ignore a stray real copy as defense-in-depth.
+claude/settings.json

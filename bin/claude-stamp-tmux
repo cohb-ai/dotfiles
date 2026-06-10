@@ -20,8 +20,9 @@
 # (so `tmux set-environment` lands on the right session via the inherited $TMUX_PANE).
 # Always exits 0 so it can never block a session from starting.
 #
-# Wired via claude/settings.json -> hooks.SessionStart. session_id + cwd arrive in the
-# hook's JSON payload on stdin; we fall back to $CLAUDE_CODE_SESSION_ID / $PWD.
+# Wired via ~/.claude/settings.json (seeded from claude/settings.json.example) ->
+# hooks.SessionStart. session_id + cwd arrive in the hook's JSON payload on stdin;
+# we fall back to $CLAUDE_CODE_SESSION_ID / $PWD.
 set -uo pipefail
 
 IFS=$'\t' read -r sid cwd < <(python3 -c 'import sys, json

@@ -65,59 +65,37 @@ if [[ ! -e "$HOME/.zshrc.local" ]]; then
     echo "Created ~/.zshrc.local from template — edit it with your repos (DEV_REPOS) and TBEAM_HOST."
 fi
 
-# Claude Code settings — prompt before applying the author's tuned config. The repo
-# copy (claude/settings.json) sets auto-approve Bash, skipAutoPermissionPrompt, and
-# a plugin bundle; settings.json.example is a conservative real file with only the
-# session-stamping hook the tmux tooling needs. Like ~/.zshrc.local, the default is
-# a copy (not a symlink) so adopters aren't surprised. Symlink the repo copy only
-# when explicitly chosen. Never clobber an existing ~/.claude/settings.json.
-# Non-interactive / no TTY: copy the example. Override with CLAUDE_SETTINGS=author
-# or CLAUDE_SETTINGS=example.
+# Claude Code settings — ~/.claude/settings.json is a REAL COPY seeded from
+# claude/settings.json.example (only the session-stamping hook the tmux tooling
+# needs), the same pattern as ~/.zshrc.local. It is deliberately per-machine and
+# untracked: Claude Code WRITES to this file at runtime (/model saves the default
+# model, "always allow" appends permission rules, plugin toggles land here), so a
+# tracked or symlinked copy keeps the repo dirty and risks committing private
+# allow-rules. A legacy author-mode symlink into the repo (the old install
+# choice 2) is materialized into a real copy of its current content. Never
+# clobber an existing real file.
 install_claude_settings() {
     local dst="$HOME/.claude/settings.json"
     local example="$DOTFILES_DIR/claude/settings.json.example"
-    local author="$DOTFILES_DIR/claude/settings.json"
-    local choice="${CLAUDE_SETTINGS:-}"
 
     mkdir -p "$HOME/.claude"
 
-    if [[ -e "$dst" || -L "$dst" ]]; then
+    if [[ -L "$dst" ]]; then
+        if cp "$dst" "$dst.tmp" 2>/dev/null; then   # cp follows the link
+            rm "$dst" && mv "$dst.tmp" "$dst"
+            echo "Materialized $dst as a real copy (settings are per-machine now)"
+        else
+            rm "$dst"   # dangling link (repo file gone) — reseed from the example
+        fi
+    fi
+
+    if [[ -e "$dst" ]]; then
         echo "Keeping existing $dst"
         return
     fi
 
-    if [[ -z "$choice" && -t 0 ]]; then
-        echo ""
-        echo "Claude Code settings (~/.claude/settings.json):"
-        echo "  1) Example — session-stamping hook only; you approve Bash yourself (recommended)"
-        echo "  2) Author's settings — auto-approve Bash, skip permission prompts, plugin bundle"
-        read -r -p "Choice [1]: " choice
-        choice="${choice:-1}"
-        case "$choice" in
-            1|example) choice=example ;;
-            2|author)  choice=author ;;
-            *)
-                echo "Unknown choice '$choice' — using example." >&2
-                choice=example
-                ;;
-        esac
-    elif [[ -z "$choice" ]]; then
-        choice=example
-    fi
-
-    case "$choice" in
-        author)
-            link "$author" "$dst"
-            ;;
-        example)
-            cp "$example" "$dst"
-            echo "Created $dst from settings.json.example"
-            ;;
-        *)
-            echo "install.sh: unknown CLAUDE_SETTINGS='$choice' (use author or example)" >&2
-            exit 1
-            ;;
-    esac
+    cp "$example" "$dst"
+    echo "Created $dst from settings.json.example"
 }
 install_claude_settings
 
