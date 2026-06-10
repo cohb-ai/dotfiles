@@ -123,6 +123,7 @@ class Style:
         self.g = "\033[32m" if tty else ""
         self.c = "\033[36m" if tty else ""
         self.y = "\033[2m" if tty else ""
+        self.b = "\033[1m" if tty else ""
         self.r = "\033[0m" if tty else ""
 
 
@@ -166,7 +167,9 @@ def _scope_filter(rows, scope):
 def _header(st, scope):
     note = ""
     if scope:
-        note = f"   {st.y}(repo: {os.path.basename(scope)} — --all for all){st.r}"
+        # Make the scoped repo prominent (bold cyan) — the rest of the note stays dim.
+        repo = os.path.basename(scope)
+        note = f"   {st.y}(repo: {st.r}{st.b}{st.c}{repo}{st.r}{st.y} — --all for all){st.r}"
     return f"dev sessions   {st.g}●{st.r} attached · {st.c}✓{st.r} active context{note}"
 
 
@@ -236,8 +239,8 @@ def _render_remote(rows, scope, st):
         print(f"  {amark} {cmark}     {hostcell:<{host_w}} {r['slot']:<{name_w}} {st.y}{summary}{st.r}")
         if ":" in r["slot"]:                       # colon marks a foreground row
             has_fg = True
-    foot = ("reattach: t open <repo> <slot> · on host: t open <repo> <slot> --remote · "
-            "pull: --here")
+    foot = ("attach (auto-finds its host): t open <repo> <slot> · "
+            "pull here: t beam <repo> <slot> --from <host>")
     if has_fg:
         foot += " · foreground: t on <host> t open <id>"
     print()
@@ -397,8 +400,7 @@ Run `t <verb> -h` for a verb's own flags.""")
     sp.add_argument("slot", nargs="?", help="slot number, 'fg' (adopt a :fg session), or a session id")
     sp.add_argument("--new", action="store_true", help="force a fresh session")
     sp.add_argument("--fg", action="store_true", help="no tmux: foreground-resume / run inline")
-    sp.add_argument("-r", "--remote", action="store_true", help="attach a slot live on another host")
-    sp.add_argument("--here", action="store_true", help="with --remote: pull it down to this machine")
+    sp.add_argument("-r", "--remote", action="store_true", help="force the remote branch (a remote-only slot is auto-attached without this)")
 
     sp = sub.add_parser("ls", help="list dev sessions (attached + active context)")
     sp.add_argument("-r", "--remote", action="store_true", help="span every $REMOTE_HOSTS host")
@@ -418,10 +420,11 @@ Run `t <verb> -h` for a verb's own flags.""")
     sp.add_argument("repo", nargs="?")
     sp.add_argument("slot", nargs="?")
 
-    sp = sub.add_parser("beam", help="send a session to another machine and resume it there")
+    sp = sub.add_parser("beam", help="move a session between machines (send, or --from to receive)")
     sp.add_argument("repo", nargs="?")
     sp.add_argument("slot", nargs="?")
-    sp.add_argument("--host", help="destination machine (default: $TBEAM_HOST)")
+    sp.add_argument("--host", help="SEND destination machine (default: $TBEAM_HOST)")
+    sp.add_argument("--from", dest="from_host", metavar="HOST", help="RECEIVE: pull <repo> [slot] from HOST to this machine")
     sp.add_argument("--fg", action="store_true", help="resume in the foreground, no tmux slot")
     sp.add_argument("-d", "--detach", action="store_true", help="leave it running there; print attach hint")
     sp.add_argument("-p", "--pick", action="store_true", help="force the picker")
