@@ -211,7 +211,7 @@ def _render_local(rows, scope, st, has_remote=False):
             has_fg = True
     foot = "reattach: t open <repo> <slot>"
     if has_fg:
-        foot += " · foreground: t fg <id>"
+        foot += " · foreground: t open <id>"
     if has_remote:
         foot += " · other machines: t ls -r"
     print()
@@ -239,7 +239,7 @@ def _render_remote(rows, scope, st):
     foot = ("reattach: t open <repo> <slot> · on host: t open <repo> <slot> --remote · "
             "pull: --here")
     if has_fg:
-        foot += " · foreground: t on <host> t fg <id>"
+        foot += " · foreground: t on <host> t open <id>"
     print()
     print(f"  {st.y}{foot}{st.r}")
 
@@ -360,7 +360,7 @@ def _read_usage(cfg):
 # here means it was invoked DIRECTLY (e.g. `command t open`, or a context with no
 # t() function) — which cannot perform the shell action.
 
-_SHELL_BOUND = {"open", "fg", "pop", "push", "beam", "find", "__resolve"}
+_SHELL_BOUND = {"open", "pop", "push", "beam", "find", "__resolve"}
 
 
 def cmd_pending(cfg, args):
@@ -380,6 +380,7 @@ def build_parser():
 examples:
   t open api              open/reattach the next free api slot
   t open api 3 --new      force a fresh session in api slot 3
+  t open a4aa5f6a         adopt a foreground (:fg) session here (id from t ls)
   t ls                    list this repo's live sessions
   t ls -r                 list live sessions across every machine
   t push                  send the current session to a background tmux slot
@@ -392,15 +393,12 @@ Run `t <verb> -h` for a verb's own flags.""")
     sub = p.add_subparsers(dest="verb", metavar="<verb>")
 
     sp = sub.add_parser("open", help="open or reattach a session in a per-repo tmux slot")
-    sp.add_argument("repo", nargs="?")
-    sp.add_argument("slot", nargs="?")
+    sp.add_argument("repo", nargs="?", help="DEV_REPOS key, or a foreground session id/repo:id from `t ls`")
+    sp.add_argument("slot", nargs="?", help="slot number, 'fg' (adopt a :fg session), or a session id")
     sp.add_argument("--new", action="store_true", help="force a fresh session")
     sp.add_argument("--fg", action="store_true", help="no tmux: foreground-resume / run inline")
     sp.add_argument("-r", "--remote", action="store_true", help="attach a slot live on another host")
     sp.add_argument("--here", action="store_true", help="with --remote: pull it down to this machine")
-
-    sp = sub.add_parser("fg", help="reattach a foreground (:fg) session in this terminal")
-    sp.add_argument("repo", nargs="?")
 
     sp = sub.add_parser("ls", help="list dev sessions (attached + active context)")
     sp.add_argument("-r", "--remote", action="store_true", help="span every $REMOTE_HOSTS host")
