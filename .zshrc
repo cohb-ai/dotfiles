@@ -231,6 +231,28 @@ typeset -gA DEV_REPOS DEV_BRANCHES REMOTE_HOSTS
 # override if set, else the global $DEV_BRANCH.
 _dev_branch_for() { print -r -- "${DEV_BRANCHES[$1]:-$DEV_BRANCH}" }
 
+# _dev_repo_prepare <branch> — sync a NEW session's checkout to <branch> without
+# TRAMPLING sibling sessions. Every dev-<repo>-* slot cd's into the SAME working tree,
+# so the old `git stash; checkout; pull` dance was destructive: `git stash` silently
+# pocketed a sibling's uncommitted work, and `git pull` (a merge by default) could move
+# the branch out from under a session mid-conversation. Policy now:
+#   • tree DIRTY (uncommitted changes — a sibling likely owns them) → do NOTHING, leave
+#     the checkout exactly as it is. Never stash. The new session just starts here.
+#   • tree CLEAN → fetch, switch to <branch> (creating it if missing), and pull
+#     --ff-only (never a merge/reset; matches the global pull.ff=only). A fast-forward
+#     on a clean tree is non-destructive — no sibling has local edits to lose.
+# Runs in the session's own shell (cwd = the repo, set by tmux -c / the -f `cd`).
+_dev_repo_prepare() {
+  local branch="$1"
+  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+    echo "↷ branch sync skipped — this shared checkout has uncommitted changes (a sibling session may own them)."
+    return 0
+  fi
+  git fetch -q origin 2>/dev/null
+  git checkout -q "$branch" 2>/dev/null || git checkout -qb "$branch" 2>/dev/null
+  git pull -q --ff-only origin "$branch" 2>/dev/null || true
+}
+
 # Generate a cd shortcut per repo: each key jumps straight to its dir.
 for _repo in ${(k)DEV_REPOS}; do
   alias "$_repo"="cd ${DEV_REPOS[$_repo]}"
@@ -1104,7 +1126,7 @@ _dev_new_session() {
   # (single-window) tmux session instead of leaving an idle prompt behind. Fires
   # on any exit (clean or crash); crash output survives in the pipe-pane logfile
   # (`t read`). `t pop` kill-sessions the slot itself, so the exit is moot there.
-  tmux send-keys -t "$session" "git stash; git fetch origin; git checkout $branch 2>/dev/null || git checkout -b $branch; git pull origin $branch; claude --session-id $sid; exit" Enter
+  tmux send-keys -t "$session" "_dev_repo_prepare ${(q)branch}; claude --session-id $sid; exit" Enter
 }
 
 # dev — open/reattach a Claude Code tmux session (local or on another host)
@@ -1300,7 +1322,7 @@ _t_dev() {
     fi
     echo "Starting claude in $dir (no tmux)"
     cd "$dir" || return 1
-    git stash; git fetch origin; git checkout $branch 2>/dev/null || git checkout -b $branch; git pull origin $branch
+    _dev_repo_prepare "$branch"
     claude
     return
   fi
