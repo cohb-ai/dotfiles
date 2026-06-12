@@ -790,24 +790,30 @@ _dev_cwd_repo_dir() {
 # defaults (`t paste 4` in ~/code/financial-forecast → that repo's slot 4; bare
 # `t open` → the repo you're standing in). _dev_cwd_repo_dir gives the DIR, but
 # slot verbs target session NAMES (dev-<alias>-<slot>) and several aliases can key
-# one dir (dot-* and dotfiles-* both root at ~/code/dotfiles) — so with a <slot>,
-# a LIVE dev-*-<slot> session rooted in this repo dir wins and the alias is read
-# off the actual session name (matches however the slot was created). Otherwise
-# fall back to the DEV_REPOS key for the dir: the key matching its basename, else
+# one dir (dot-* and dotfiles-* both root at ~/code/dotfiles) — so a LIVE dev-*
+# session rooted in this repo dir wins and the alias is read off the actual
+# session name: the exact <slot>'s session when one is given, else the dir's
+# first live session (so a bare `t open`/`t paste` joins the alias already in
+# use here instead of minting a sibling slot under a second alias). No live
+# session → the DEV_REPOS key for the dir: the key matching its basename, else
 # the shortest (the customary shorthand). Prints nothing / rc 1 outside any
 # DEV_REPOS dir, so callers can drop to their usage text.
 _t_infer_repo() {
   local slot="$1" dir; dir=$(_dev_cwd_repo_dir)
   [[ -n $dir ]] || return 1
-  if [[ $slot == <-> ]]; then
-    local s p
-    for s in ${(f)"$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -- "^dev-.*-${slot}\$")"}; do
+  # Two passes when a slot is given: that exact slot's session first, then any
+  # live session here (a not-yet-live slot still joins the in-use alias).
+  local -a pats=("[0-9]\{1,\}")
+  [[ $slot == <-> ]] && pats=("$slot" "[0-9]\{1,\}")
+  local pat s p
+  for pat in $pats; do
+    for s in ${(f)"$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -- "^dev-.*-${pat}\$")"}; do
       p=$(tmux display-message -p -t "$s" '#{session_path}' 2>/dev/null)
       if [[ $p == $dir || $p == $dir/* ]]; then
         s=${s#dev-}; print -r -- "${s%-*}"; return 0   # last dash splits off the slot
       fi
     done
-  fi
+  done
   local k best=
   for k in ${(k)DEV_REPOS}; do
     [[ ${DEV_REPOS[$k]} == $dir ]] || continue

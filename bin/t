@@ -19,6 +19,7 @@
 # for the data and renders in Python. Reimplementing ps-tree walking buys nothing.
 
 import argparse
+import glob
 import os
 import re
 import shlex
@@ -286,9 +287,11 @@ _PERL_STRIP = r"s/\r//g; s/\x07//g; s/\x1b\[[\d;]*[ABCDEFGHJKLMNSTXZfhln]//g; s/
 
 def _infer_repo(cfg, slot=None):
     """Repo alias implied by cwd — the bin-side twin of zsh's _t_infer_repo (t read
-    is bin-native so it can't call the zsh helper). With a slot, an existing
-    dev-<alias>-<slot>.log wins (matches however the session was actually named when
-    several aliases key one dir); else the alias for the cwd's DEV_REPOS dir
+    is bin-native so it can't call the zsh helper). Evidence is the log files
+    (t read targets logs, which outlive sessions): an existing dev-<alias>-<slot>.log
+    wins, then any dev-<alias>-*.log — newest mtime first either way, so when several
+    aliases key one dir (dot-* and dotfiles-* both at ~/code/dotfiles) the alias
+    actually in use beats a stale one. No logs → the DEV_REPOS key for the dir
     (basename match preferred, then shortest)."""
     d = cfg.repo_dir_for_cwd(os.getcwd())
     if not d:
@@ -296,10 +299,23 @@ def _infer_repo(cfg, slot=None):
     aliases = [k for k, v in cfg.repos.items() if v == d]
     if not aliases:
         return None
-    if slot:
+    logdir = os.path.join(HOME, ".tmux-logs")
+
+    def newest(patterns):
+        cands = []
         for k in aliases:
-            if os.path.isfile(os.path.join(HOME, ".tmux-logs", f"dev-{k}-{slot}.log")):
-                return k
+            for pat in patterns(k):
+                if os.path.isfile(pat):
+                    cands.append((os.path.getmtime(pat), k))
+        return max(cands)[1] if cands else None
+
+    if slot:
+        hit = newest(lambda k: [os.path.join(logdir, f"dev-{k}-{slot}.log")])
+        if hit:
+            return hit
+    hit = newest(lambda k: glob.glob(os.path.join(logdir, f"dev-{k}-[0-9]*.log")))
+    if hit:
+        return hit
     base = os.path.basename(d)
     if base in aliases:
         return base
