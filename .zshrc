@@ -751,6 +751,22 @@ _dev_cwd_repo_dir() {
   [[ -n $best ]] && print -r -- "$best"
 }
 
+# _dev_cwd_repo_key — like _dev_cwd_repo_dir, but print a DEV_REPOS *key* for the
+# repo containing $PWD (the dir alone can't name a tmux slot). When several keys
+# point at the same dir (dot-* and dotfiles-* both map to ~/code/dotfiles), prefer
+# the key matching the dir basename, else the shortest. Powers bare `t open`.
+_dev_cwd_repo_key() {
+  local dir; dir=$(_dev_cwd_repo_dir)
+  [[ -n $dir ]] || return 1
+  local k best= want=${dir:t}
+  for k in ${(ok)DEV_REPOS}; do
+    [[ ${DEV_REPOS[$k]} == $dir ]] || continue
+    [[ $k == $want ]] && { best=$k; break; }
+    [[ -z $best || ${#k} -lt ${#best} ]] && best=$k
+  done
+  [[ -n $best ]] && print -r -- "$best"
+}
+
 _dev_list() {
   local scope="$1"
   local names
@@ -1164,6 +1180,18 @@ _t_dev() {
   fi
 
   # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
+
+  # Bare `t open` (no repo named) — default to the repo you're standing in, the
+  # same cwd-scoping `t ls` uses, so `cd repo && t open` just works. A lone slot
+  # (`t open 2`, `t open fg`, `t open new`) with no valid repo likewise targets the
+  # cwd repo. Outside any DEV_REPOS dir nothing resolves, so the usage block below
+  # still fires.
+  if [[ -z "$repo" ]]; then
+    repo=$(_dev_cwd_repo_key)
+  elif [[ -z "${DEV_REPOS[$repo]}" && -z "$slot" && "$repo" == (<->|new|fg) ]]; then
+    local cwdrepo; cwdrepo=$(_dev_cwd_repo_key)
+    [[ -n $cwdrepo ]] && { slot="$repo"; repo="$cwdrepo" }
+  fi
 
   if [[ -z "$repo" || -z "${DEV_REPOS[$repo]}" ]]; then
     # Styled gh-style (piped through _help_style), but the Repos: section is built
