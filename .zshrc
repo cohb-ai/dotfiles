@@ -1253,7 +1253,10 @@ _t_dev() {
   # `t open --new` → a fresh slot here) — see _t_infer_repo. Deliberately AFTER the
   # -r branch above so the documented bare `t open -r` every-slot picker survives.
   # Outside every DEV_REPOS dir this leaves repo empty and the usage below explains.
-  if [[ -z ${DEV_REPOS[$repo]:-} && -z $slot && ( $repo == <-> || $repo == new || $repo == fg ) ]]; then
+  # `t open 4 --new` lands here as `repo=4 slot=new` (--new became a positional in
+  # _t_open) — the explicit numeric slot still wins, the redundant keyword drops.
+  if [[ -z ${DEV_REPOS[$repo]:-} && ( $repo == <-> || $repo == new || $repo == fg ) \
+        && ( -z $slot || $slot == new || $slot == fg ) ]]; then
     slot=$repo; repo=
   fi
   [[ -z $repo ]] && repo=$(_t_infer_repo "$slot")
@@ -1503,6 +1506,14 @@ _dev_remote_attach() {
 # prompt — unless <force>/-y — works through the TTY). The mirror of a local dev kill.
 _dev_remote_kill() {
   local repo="$1" slot="$2" force="$3"
+  # Repo-aware: `t kill -r 4` / `t kill -r all` mean the repo $PWD is in, mirroring
+  # the local `t kill` slot-only forms (see _dev_kill / _t_infer_repo). Without this
+  # the raw `4`/`all` would be resolved as a remote repo alias.
+  if [[ -z ${DEV_REPOS[$repo]:-} && -z $slot && ( $repo == <-> || $repo == all ) ]]; then
+    slot=$repo; repo=$(_t_infer_repo "$slot")
+  elif [[ -z $repo ]]; then
+    repo=$(_t_infer_repo)
+  fi
   local res; res=$(_dev_remote_resolve "$repo" "$slot") || return 1
   local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
   local target="${REMOTE_HOSTS[$host]:-$host}"
