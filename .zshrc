@@ -231,6 +231,28 @@ typeset -gA DEV_REPOS DEV_BRANCHES REMOTE_HOSTS
 # override if set, else the global $DEV_BRANCH.
 _dev_branch_for() { print -r -- "${DEV_BRANCHES[$1]:-$DEV_BRANCH}" }
 
+# _dev_repo_prepare <branch> — sync a NEW session's checkout to <branch> without
+# TRAMPLING sibling sessions. Every dev-<repo>-* slot cd's into the SAME working tree,
+# so the old `git stash; checkout; pull` dance was destructive: `git stash` silently
+# pocketed a sibling's uncommitted work, and `git pull` (a merge by default) could move
+# the branch out from under a session mid-conversation. Policy now:
+#   • tree DIRTY (uncommitted changes — a sibling likely owns them) → do NOTHING, leave
+#     the checkout exactly as it is. Never stash. The new session just starts here.
+#   • tree CLEAN → fetch, switch to <branch> (creating it if missing), and pull
+#     --ff-only (never a merge/reset; matches the global pull.ff=only). A fast-forward
+#     on a clean tree is non-destructive — no sibling has local edits to lose.
+# Runs in the session's own shell (cwd = the repo, set by tmux -c / the -f `cd`).
+_dev_repo_prepare() {
+  local branch="$1"
+  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+    echo "↷ branch sync skipped — this shared checkout has uncommitted changes (a sibling session may own them)."
+    return 0
+  fi
+  git fetch -q origin 2>/dev/null
+  git checkout -q "$branch" 2>/dev/null || git checkout -qb "$branch" 2>/dev/null
+  git pull -q --ff-only origin "$branch" 2>/dev/null || true
+}
+
 # Generate a cd shortcut per repo: each key jumps straight to its dir.
 for _repo in ${(k)DEV_REPOS}; do
   alias "$_repo"="cd ${DEV_REPOS[$_repo]}"
@@ -652,7 +674,7 @@ _dev_fg_rows() {
     for k in ${(k)DEV_REPOS}; do [[ ${DEV_REPOS[$k]} == $cwd ]] && { repo=$k; break; }; done
     # Label is "<repo>:<short-sid>" — the short Claude session id makes each
     # foreground row UNIQUE (two `dot` foreground claudes were both "dot:fg" before)
-    # and is the handle `t fg <id>` reattaches by. The colon marks an fg row (tmux
+    # and is the handle `t open <id>` reattaches by. The colon marks an fg row (tmux
     # slots use "<repo>-<num>"). A pre-registry session (no id) falls back to ":fg".
     if [[ -n $sid ]]; then
       label="${repo}:${sid[1,8]}"
@@ -689,26 +711,39 @@ _dev_pid_for_sid() {
   return 1
 }
 
-# _dev_adopt_fg [repo] — reattach a FOREGROUND (:fg) session by MOVING it here. A
+# _dev_fg_handle <arg> — is <arg> shaped like a foreground-session handle? True for
+# the displayed `repo:id` label (any `:`) and for a short session-id prefix: 4+ chars,
+# all hex, at least one letter — pure digits stay tmux slot numbers, so `t open dot
+# 1234` can never be stolen by a (rare) all-digit id prefix; type more chars or the
+# repo:id form for those. The dispatcher `_t_dev` uses this to tell slots from ids.
+_dev_fg_handle() {
+  local h="$1"
+  [[ $h == *:* ]] && return 0
+  (( ${#h} >= 4 )) || return 1
+  [[ $h != *[^0-9a-f]* && $h == *[a-f]* ]]
+}
+
+# _dev_adopt_fg [repo|id] — reattach a FOREGROUND (:fg) session by MOVING it here. A
 # foreground claude is bound to its own terminal (no tmux to attach to), so the only
 # way to "get into it" from elsewhere is to stop that owner and resume the conversation
 # in THIS terminal — matching how it is running (the tmux-slot analog is `t open <repo>
 # <slot>` / `t beam … --from`). One-live-owner: Claude takes no transcript lock, so two live
 # resumers of one id diverge — hence the SIGTERM-then-wait before `claude -r`, mirroring
 # t pop. Only :fg rows whose id the registry recorded (sid != `-`) are resumable; a
-# pre-registry one must be reattached from its own terminal.
-#   • `t fg`          — no arg: auto-resolve across ALL foreground sessions (one → use
-#                       it, several → fzf-pick). The easy path.
-#   • `t fg <id>`     — the short session id shown in `t ls` (e.g. `t fg a4aa5f6a`, or
-#                       the displayed `dot:a4aa5f6a`) → that exact session. Unambiguous.
-#   • `t fg <repo>`   — a DEV_REPOS key → that repo's foreground sessions.
+# pre-registry one must be reattached from its own terminal. All entry points are
+# `t open` (the one get-into-a-session verb; the old `t fg` is gone):
+#   • `t open <id>`      — the short session id shown in `t ls` (e.g. `t open a4aa5f6a`,
+#                          or the displayed `dot:a4aa5f6a`) → that exact session.
+#                          `t open <repo> <id>` works too — the id alone decides.
+#   • `t open <repo> fg` — that repo's foreground sessions (one → use it, several →
+#                          fzf-pick); the `fg` slot keyword mirrors the `:fg` label.
 _dev_adopt_fg() {
   local arg="$1" rows
   # all foreground rows (the colon in the slot label marks fg; tmux slots use a dash)
   rows=$(_dev_fg_rows 2>/dev/null | awk -F'\t' '$3 ~ /:/')
-  [[ -n $rows ]] || { echo "t fg: no foreground claude running (see \`t ls\`)." >&2; return 1; }
+  [[ -n $rows ]] || { echo "t open: no foreground claude running (see \`t ls\`)." >&2; return 1; }
   local resumable; resumable=$(print -r -- "$rows" | awk -F'\t' '$1!="-"')
-  [[ -n $resumable ]] || { echo "t fg: foreground claude(s) predate the session registry (no id recorded) — reattach from their own terminal." >&2; return 1; }
+  [[ -n $resumable ]] || { echo "t open: foreground claude(s) predate the session registry (no id recorded) — reattach from their own terminal." >&2; return 1; }
   if [[ -n $arg ]]; then
     local sel
     if [[ -n ${DEV_REPOS[$arg]} ]]; then            # an exact repo key → that repo's rows
@@ -717,10 +752,10 @@ _dev_adopt_fg() {
       local idpart="${arg##*:}"
       sel=$(print -r -- "$resumable" | awk -F'\t' -v p="$idpart" 'index($1,p)==1')
     fi
-    [[ -n $sel ]] || { echo "t fg: no foreground session matching '$arg' (see \`t ls\`)." >&2; return 1; }
+    [[ -n $sel ]] || { echo "t open: no foreground session matching '$arg' (see \`t ls\`)." >&2; return 1; }
     resumable=$sel
   else
-    # Repo-aware: bare `t fg` prefers this repo's foreground claudes (row cwd in
+    # Repo-aware: no-arg adoption prefers this repo's foreground claudes (row cwd in
     # field 2, under the $PWD repo dir); outside a repo — or no match — all of them.
     local scope; scope=$(_dev_cwd_repo_dir)
     if [[ -n $scope ]]; then
@@ -733,10 +768,10 @@ _dev_adopt_fg() {
   if (( ${#lines} == 1 )); then
     IFS=$'\t' read -r sid cwd _ <<< "${lines[1]}"
   else
-    [[ -t 0 && -t 1 ]] || { echo "t fg: several foreground sessions — name one (\`t fg <id>\`) or pick from a terminal:" >&2; print -r -- "$resumable" | awk -F'\t' '{printf "  %s  %s\n",$3,$6}' >&2; return 1; }
+    [[ -t 0 && -t 1 ]] || { echo "t open: several foreground sessions — name one (\`t open <id>\`) or pick from a terminal:" >&2; print -r -- "$resumable" | awk -F'\t' '{printf "  %s  %s\n",$3,$6}' >&2; return 1; }
     local pick
     pick=$(print -r -- "$resumable" | awk -F'\t' '{printf "%s\t%s\t%s\n", $1, $3, $6}' \
-             | fzf --with-nth=2.. --delimiter='\t' --prompt="t fg > ") || return 1
+             | fzf --with-nth=2.. --delimiter='\t' --prompt="t open > ") || return 1
     sid=${pick%%$'\t'*}
     cwd=$(print -r -- "$resumable" | awk -F'\t' -v s="$sid" '$1==s{print $2; exit}')
   fi
@@ -887,11 +922,11 @@ _dev_list() {
     (( ${#fsummary} > avail )) && fsummary="${fsummary[1,avail-1]}…"
     printf '  %s %s     %-*s %s%s%s\n' "${g}●${r0}" "$cmark" $name_w "$_fslot" "$y" "$fsummary" "$r0"
   done <<< "$fgrows"
-  # reattach legend: tmux slots via `dev <repo> <slot>`; a foreground (:fg) row is
-  # bound to its terminal, so it comes back foreground via `dev <repo> fg` (shown
+  # reattach legend: tmux slots via `t open <repo> <slot>`; a foreground (:fg) row is
+  # bound to its terminal, so it comes back foreground via `t open <id>` (shown
   # only when the list actually has a :fg row).
   local foot="reattach: t open <repo> <slot>"
-  [[ -n $fgrows ]] && foot+=" · foreground (:fg): t fg"
+  [[ -n $fgrows ]] && foot+=" · foreground: t open <id>"
   print -r -- ""
   print -r -- "  ${y}${foot}${r0}"
 }
@@ -1035,11 +1070,11 @@ _dev_list_remote() {
   done <<< "$rows"
   # reattach legend: `t open` auto-attaches a slot on its host; `t beam … --from <host>`
   # pulls it here (a move). A foreground (:fg) row is bound to its terminal, so it is
-  # reattached on its host via `on <host> dev <repo> fg` (shown only when a :fg row is
+  # reattached on its host via `t on <host> t open <id>` (shown only when a :fg row is
   # present — slot is field 4 of the prefixed rows).
   local foot="attach (auto-finds its host): t open <repo> <slot> · pull here: t beam <repo> <slot> --from <host>"
   print -r -- "$rows" | awk -F'\t' '$4 ~ /:/{f=1} END{exit !f}' \
-    && foot+=" · foreground: t on <host> t fg <id>"
+    && foot+=" · foreground: t on <host> t open <id>"
   print -r -- ""
   print -r -- "  ${y}${foot}${r0}"
 }
@@ -1153,7 +1188,11 @@ _dev_new_session() {
   tmux set-option -t "$session" window-size latest 2>/dev/null
   tmux pipe-pane -t "$session" -o "cat >> $logfile"
   tmux set-environment -t "$session" CLAUDE_RESUME_ID "$sid"
-  tmux send-keys -t "$session" "git stash; git fetch origin; git checkout $branch 2>/dev/null || git checkout -b $branch; git pull origin $branch; claude --session-id $sid" Enter
+  # `; exit` so quitting Claude closes the pane's shell and tears down the
+  # (single-window) tmux session instead of leaving an idle prompt behind. Fires
+  # on any exit (clean or crash); crash output survives in the pipe-pane logfile
+  # (`t read`). `t pop` kill-sessions the slot itself, so the exit is moot there.
+  tmux send-keys -t "$session" "_dev_repo_prepare ${(q)branch}; claude --session-id $sid; exit" Enter
 }
 
 # dev — open/reattach a Claude Code tmux session (local or on another host)
@@ -1163,8 +1202,9 @@ _dev_new_session() {
 #
 # Commands:
 #   dev <repo> [slot|new]        open/reattach (slot 1-4, or 'new' to force fresh)
-#   dev <repo> fg                reattach a foreground (:fg) session here (claude -r;
-#                                stops its terminal-bound owner — matches how it runs)
+#   dev <id> | <repo> fg|<id>    reattach a foreground (:fg) session here (claude -r;
+#                                stops its terminal-bound owner — matches how it runs);
+#                                <id> is the short hex id `t ls` shows (dot:a4aa5f6a)
 #   dev -r [repo [slot]]         attach a slot that's live on another $REMOTE_HOSTS
 #                                host (host auto-inferred; fzf-pick if several match)
 #   dev list | ls [-r] [-a]      list dev sessions (attached + active context),
@@ -1233,41 +1273,38 @@ _t_dev() {
     return
   fi
 
-  # Remote-aware open: a slot can live on THIS machine or another, and `t open` finds
-  # it wherever it is and ATTACHES IN PLACE (the session stays put — moving it between
-  # machines is `t beam`'s job, not open's). A live LOCAL slot always wins (cheap tmux
-  # check — no ssh). When the named slot is NOT live here, the AUTO path probes
-  # $REMOTE_HOSTS (host inferred, _dev_remote_resolve): live there → attach over ssh -t;
-  # live nowhere → fall through to the local path (fresh start). The auto-probe is
-  # skipped when no hosts are configured, for an explicit fresh/foreground request
-  # (new/fg/-f), and outside DEV_REPOS (an unknown repo errors locally below). -r/--remote
-  # FORCES the remote branch regardless of a local slot — and covers the bare `t open -r`
-  # picker. To bring a remote session HERE (a move), use `t beam <repo> <slot> --from <host>`.
+  # Remote-aware open (explicit half): a slot can live on THIS machine or another.
+  # -r/--remote FORCES the remote branch — attach in place on its host (the session
+  # stays put; MOVING it between machines is `t beam`'s job), and a bare `t open -r` is
+  # the all-remote picker. The AUTO half runs further down, once <repo> is resolved from
+  # the cwd, so even a bare `t open` in a repo dir can find a slot that is live only on
+  # another host. To pull a remote session HERE (a move), use `t beam … --from <host>`.
   if [[ -n $remote ]]; then
     _dev_remote "$repo" "$slot" "$no_tmux"     # explicit -r: force attach in place on its host
     return
   fi
 
+  # An id-shaped lone arg (`t open f0f1bbef`, or the displayed `dot:f0f1bbef` label)
+  # is a foreground-session handle, not a repo — adopt that session here. The id
+  # alone identifies it, so no repo is needed; a real DEV_REPOS key always wins
+  # (checked first), and _dev_fg_handle never matches slot numbers or `new`.
+  if [[ -n "$repo" && -z "$slot" && -z "${DEV_REPOS[$repo]}" ]] && _dev_fg_handle "$repo"; then
+    _dev_adopt_fg "$repo"
+    return
+  fi
+
   # Repo-aware defaults: bare `t open` targets the repo $PWD is in, and a lone
   # numeric/slot-keyword first arg is a SLOT of it (`t open 4` ≡ `t open <cwd-repo> 4`,
-  # `t open --new` → a fresh slot here) — see _t_infer_repo. Deliberately AFTER the
-  # -r branch above so the documented bare `t open -r` every-slot picker survives.
-  # Outside every DEV_REPOS dir this leaves repo empty and the usage below explains.
+  # `t open --new` → a fresh slot here, `t open fg` → adopt this repo's :fg session)
+  # — see _t_infer_repo. Deliberately AFTER the -r branch (so the documented bare
+  # `t open -r` every-slot picker survives) and the id-shaped fg adoption above;
+  # the remote auto-probe runs further down, once <repo> is resolved, so even a
+  # bare `t open` can find a slot that is live only on another host. Outside every
+  # DEV_REPOS dir this leaves repo empty and the usage below explains.
   if [[ -z ${DEV_REPOS[$repo]:-} && -z $slot && ( $repo == <-> || $repo == new || $repo == fg ) ]]; then
     slot=$repo; repo=
   fi
   [[ -z $repo ]] && repo=$(_t_infer_repo "$slot")
-
-  if (( ${#REMOTE_HOSTS} )) && [[ -z $no_tmux && -n $repo && -n ${DEV_REPOS[$repo]} \
-        && $slot != new && $slot != fg ]] && ! _dev_local_slot_live "$repo" "$slot"; then
-    local res; res=$(_dev_remote_resolve "$repo" "$slot" 2>/dev/null)   # quiet probe
-    if [[ -n $res ]]; then
-      echo "(not live here — attaching on ${res%%$'\t'*}; Ctrl-b d to detach)"
-      _dev_remote_attach "$res" "$no_tmux"
-      return
-    fi
-    # nothing live remotely either → fall through to the local path (fresh start)
-  fi
 
   # repo→path map: see the global DEV_REPOS (defined near the cd shortcuts)
 
@@ -1282,6 +1319,7 @@ _t_dev() {
       print -r -- "Commands:"
       print -r -- "  t open                      no repo: the one \$PWD is in (t open 4 = its slot 4)"
       print -r -- "  t open <repo> [slot]        open/reattach (slot 1-4, --new to force fresh)"
+      print -r -- "  t open <id> | <repo> fg     adopt a foreground (:fg) session here (id from t ls)"
       print -r -- "  t open <repo> [slot] --fg   no tmux: foreground-resume / run inline"
       print -r -- "  t open <repo> [slot]        auto-attaches on another host if the slot is live there"
       print -r -- "  t beam <repo> [slot] --from <host>   pull that session HERE (move); omit --from to send"
@@ -1308,14 +1346,35 @@ _t_dev() {
     return 1
   fi
 
-  # `dev <repo> fg` — reattach a FOREGROUND (:fg) session listed by `dev ls`. It is
-  # bound to its own terminal, so reattaching means MOVING it here: stop that owner
-  # and `claude -r` in THIS terminal. Matches how it is running — the tmux-slot analog
-  # is plain `dev <repo> <slot>`. (`fg` as the slot keyword mirrors the `<repo>:fg`
-  # label; -f is irrelevant here since fg is inherently a foreground resume.)
+  # `t open <repo> fg|<id>` — reattach a FOREGROUND (:fg) session listed by `t ls`.
+  # It is bound to its own terminal, so reattaching means MOVING it here: stop that
+  # owner and `claude -r` in THIS terminal. Matches how it is running — the tmux-slot
+  # analog is plain `t open <repo> <slot>`. (`fg` as the slot keyword mirrors the
+  # `:fg` label and scopes to the repo; an id-shaped slot — see _dev_fg_handle —
+  # names the exact session. -f is irrelevant here: fg adoption is inherently a
+  # foreground resume.)
   if [[ "$slot" == fg ]]; then
     _dev_adopt_fg "$repo"
     return
+  elif _dev_fg_handle "$slot"; then
+    _dev_adopt_fg "$slot"
+    return
+  fi
+
+  # Remote-aware open (auto half): <repo> is a valid key now (cwd-defaulted if bare) and
+  # fg adoption already returned, so a slot that is NOT live HERE but IS live on a
+  # $REMOTE_HOSTS host gets attached IN PLACE there (host inferred) — a live LOCAL slot
+  # always wins (cheap tmux check, no ssh). Skipped with no hosts, for -f/`new` (a
+  # foreground/fresh request stays local), and when a local slot is already live; if
+  # nothing is live remotely either, fall through to the local fresh-start path.
+  if (( ${#REMOTE_HOSTS} )) && [[ -z $no_tmux && $slot != new ]] && ! _dev_local_slot_live "$repo" "$slot"; then
+    local res; res=$(_dev_remote_resolve "$repo" "$slot" 2>/dev/null)   # quiet probe
+    if [[ -n $res ]]; then
+      echo "(not live here — attaching on ${res%%$'\t'*}; Ctrl-b d to detach)"
+      _dev_remote_attach "$res" "$no_tmux"
+      return
+    fi
+    # nothing live remotely either → fall through to the local path (fresh start)
   fi
 
   # -f/--fg (a.k.a. --no-tmux): run claude inline, no tmux. If a SPECIFIC slot is
@@ -1331,7 +1390,7 @@ _t_dev() {
     fi
     echo "Starting claude in $dir (no tmux)"
     cd "$dir" || return 1
-    git stash; git fetch origin; git checkout $branch 2>/dev/null || git checkout -b $branch; git pull origin $branch
+    _dev_repo_prepare "$branch"
     claude
     return
   fi
@@ -1950,7 +2009,9 @@ _dev_resume_session() {
   # conversation back to the foreground (it also falls back to the dir's newest
   # transcript, but this is the precise signal when we know it).
   tmux set-environment -t "$session" CLAUDE_RESUME_ID "$sid"
-  tmux send-keys -t "$session" "claude -r $sid" Enter
+  # `; exit` so quitting Claude tears the session down rather than leaving an idle
+  # shell (see _dev_new_session for the full rationale).
+  tmux send-keys -t "$session" "claude -r $sid; exit" Enter
 }
 
 # _dev_slot_for_cwd <cwd> — map a transcript's working dir to a dev session slot.
@@ -2599,7 +2660,7 @@ _t_beam() {
 #     internal session-rows/land/kill-owner) run straight through via `command t`
 #     (the `command` builtin reaches ~/bin/t past this function, dodging the
 #     name collision — same trick the claude() wrapper uses).
-#   • shell-bound verbs (open/fg/pop/push/find) map to the existing zsh functions,
+#   • shell-bound verbs (open/pop/push/find) map to the existing zsh functions,
 #     which ALREADY do the cd + `claude -r` in the current terminal and the tpush
 #     sentinel handoff correctly *because they run in the calling shell* — a bin
 #     subprocess cannot. No resolve protocol is needed: the shim just calls them.
@@ -2614,8 +2675,7 @@ t() {
   [[ -z $verb ]] && { command t; return; }
   shift
   case "$verb" in
-    open)  _t_open "$@" ;;            # → _t_dev (local / -r remote attach / auto-detect / -f)
-    fg)    _dev_adopt_fg "$1" ;;      # foreground resume here; no repo → auto-resolve
+    open)  _t_open "$@" ;;            # → _t_dev (local / -r or auto-detect remote attach / -f / fg adopt)
     pop)   _t_pop "$@" ;;             # → cd + claude -r in THIS terminal
     push)  _t_push "$@" ;;            # → sentinel handoff; claude() wrapper spawns post-exit
     find)  _t_find "$@" ;;            # → rank/pick then cd + claude -r here
@@ -2784,15 +2844,15 @@ alias h=help   # `h` is a shorthand for `help`
 # key for `on`), and slot/flags after. Pulls live from the ${(k)DEV_REPOS} /
 # ${(k)REMOTE_HOSTS} arrays so it stays current with ~/.zshrc.local.
 _t() {
-  local -a verbs=(open fg ls kill push pop beam read plan paste find on)
+  local -a verbs=(open ls kill push pop beam read plan paste find on)
   if (( CURRENT == 2 )); then
     _describe -t verbs 't verb' verbs
     return
   fi
   case ${words[2]} in
-    open|fg|kill|read|plan|paste|beam)
+    open|kill|read|plan|paste|beam)
       if   (( CURRENT == 3 )); then _values 'repo' ${(k)DEV_REPOS}
-      elif (( CURRENT == 4 )); then _values 'slot' 1 2 3 4 new
+      elif (( CURRENT == 4 )); then _values 'slot' 1 2 3 4 new fg
       else _values 'flag' --new --fg --remote -y --yes -a --all --host --from -d --detach -p --pick -s --session -h --help; fi ;;
     on)
       (( CURRENT == 3 )) && _values 'host' ${(k)REMOTE_HOSTS} || _normal ;;
