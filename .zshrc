@@ -1439,6 +1439,20 @@ _t_dev() {
     return
   fi
 
+  # Same-dir sibling aliases (see _dev_kill / _t_pop): a `dev-dot-2` answers
+  # `t open dotfiles 2` when `dot` and `dotfiles` both key ~/code/dotfiles.
+  # Without this canonicalization the local live check below misses it and we
+  # either ssh to a remote slot of the same number or mint a duplicate local
+  # `dev-dotfiles-2`, violating the one-live-owner invariant for the slot.
+  if [[ -n $slot && $slot != new && $slot != fg && -n ${DEV_REPOS[$repo]:-} ]] \
+     && ! tmux has-session -t "dev-${repo}-${slot}" 2>/dev/null; then
+    local _odir=${DEV_REPOS[$repo]} _ok
+    for _ok in ${(k)DEV_REPOS}; do
+      [[ $_ok == $repo || ${DEV_REPOS[$_ok]} != $_odir ]] && continue
+      tmux has-session -t "dev-${_ok}-${slot}" 2>/dev/null && { repo=$_ok; break; }
+    done
+  fi
+
   # Remote-aware open (auto half): <repo> is a valid key now (cwd-defaulted if bare) and
   # fg adoption already returned, so a slot that is NOT live HERE but IS live on a
   # $REMOTE_HOSTS host gets attached IN PLACE there (host inferred) — a live LOCAL slot
