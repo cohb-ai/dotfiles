@@ -1610,7 +1610,7 @@ _dev_remote_delegate() {
   (( ${#REMOTE_HOSTS} )) || return 1
   [[ -n $repo ]] || return 1
   _dev_local_slot_live "$repo" "$slot" && return 1
-  local res; res=$(_dev_remote_resolve "$repo" "$slot" 2>/dev/null) || return 1
+  local res; res=$(_dev_remote_resolve "$repo" "$slot") || return 1
   [[ -n $res ]] || return 1
   local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
   local target="${REMOTE_HOSTS[$host]:-$host}"
