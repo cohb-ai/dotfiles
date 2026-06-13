@@ -1731,7 +1731,7 @@ _dev_remote_open() {
   for a in "$@"; do rcmd+=" ${(q)a}"; done
   echo "→ $host: $rcmd (stays on $host; Ctrl-b d to detach)"
   _term_title "$host: open ${(j: :)@}"
-  ssh -t "$target" "zsh -lic ${(q)rcmd}"
+  ssh -t "$target" "zsh -lic ${(qq)rcmd}"
   _term_title ""
 }
 
@@ -1761,7 +1761,7 @@ _dev_remote_delegate() {
   for a in "$@"; do rcmd+=" ${(q)a}"; done
   echo "→ $host:dev-${prepo}-${pslot}" >&2
   _term_title "$host: $verb $prepo $pslot"
-  ssh -t "$target" "zsh -lic ${(q)rcmd}"
+  ssh -t "$target" "zsh -lic ${(qq)rcmd}"
   _term_title ""
 }
 
