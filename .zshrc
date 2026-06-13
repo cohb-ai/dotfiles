@@ -1639,7 +1639,13 @@ _dev_remote_delegate() {
   local repo="$1" slot="$2" verb="$3"; shift 3
   (( ${#REMOTE_HOSTS} )) || return 1
   [[ -n $repo ]] || return 1
-  _dev_local_slot_live "$repo" "$slot" && return 1
+  # An empty <slot> means the caller already failed to find its specific local target
+  # (bare `t read` whose default-slot log is absent, bare `t pop` with no cwd-matched
+  # session) and is asking us to probe ANY remote slot of <repo>. Don't gate on a
+  # sibling local slot in that case — _dev_local_slot_live with an empty slot matches
+  # any `dev-<repo>-*`, which would block delegation whenever an unrelated slot of the
+  # same repo happens to be live here.
+  [[ -n $slot ]] && _dev_local_slot_live "$repo" "$slot" && return 1
   local res; res=$(_dev_remote_resolve "$repo" "$slot") || return 1
   [[ -n $res ]] || return 1
   local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
