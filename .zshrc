@@ -1155,18 +1155,24 @@ _dev_kill() {
   # check in _dev_remote_delegate/_dev_session_remote_fallback (which both key
   # off `dev-${repo}-${slot}`) also misses it, and kill delegates remotely while
   # the local same-numbered session keeps running (violating one-live-owner).
-  # Canonicalize to the sibling alias actually in use here for this slot.
+  # For a specific slot, canonicalize $repo to the sibling alias running it.
+  # For `all`/no-slot, union every sibling alias keyed to this dir so a mass
+  # kill reaches `dev-dot-1` AND `dev-dotfiles-2` in one tree (picking a single
+  # alias would silently leave sessions running under the others).
+  local -a _repos=( "$repo" )
   if [[ -n ${DEV_REPOS[$repo]:-} ]]; then
     local _kdir=${DEV_REPOS[$repo]} _kk
-    for _kk in ${(k)DEV_REPOS}; do
-      [[ $_kk == $repo || ${DEV_REPOS[$_kk]} != $_kdir ]] && continue
-      if [[ -n $slot && $slot != all ]]; then
-        tmux has-session -t "dev-${_kk}-${slot}" 2>/dev/null && { repo=$_kk; break; }
-      else
-        tmux list-sessions -F '#{session_name}' 2>/dev/null \
-          | grep -q "^dev-${_kk}-[0-9]\+\$" && { repo=$_kk; break; }
-      fi
-    done
+    if [[ -n $slot && $slot != all ]]; then
+      for _kk in ${(k)DEV_REPOS}; do
+        [[ $_kk == $repo || ${DEV_REPOS[$_kk]} != $_kdir ]] && continue
+        tmux has-session -t "dev-${_kk}-${slot}" 2>/dev/null && { repo=$_kk; _repos=( $_kk ); break; }
+      done
+    else
+      for _kk in ${(k)DEV_REPOS}; do
+        [[ $_kk == $repo || ${DEV_REPOS[$_kk]} != $_kdir ]] && continue
+        _repos+=( $_kk )
+      done
+    fi
   fi
 
   if [[ -z "$repo" ]]; then
@@ -1178,10 +1184,11 @@ _dev_kill() {
     return 1
   fi
 
-  # collect this repo's live sessions by name (dev-<repo>-<N>), numerically sorted
+  # collect this repo's live sessions by name (dev-<repo>-<N>), numerically sorted.
+  # For `all`/no-slot, $_repos is the union of sibling aliases sharing this dir.
   local -a sessions
   sessions=( ${(f)"$(tmux list-sessions -F '#{session_name}' 2>/dev/null \
-    | grep "^dev-${repo}-[0-9]\+\$" | sort -t- -k3 -n)"} )
+    | grep -E "^dev-(${(j:|:)_repos})-[0-9]+\$" | sort -t- -k3 -n)"} )
 
   if (( ! ${#sessions} )); then
     # None live HERE. If a specific slot was named and it is live on another host, tear
