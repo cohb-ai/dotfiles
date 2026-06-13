@@ -2395,7 +2395,18 @@ _t_pop() {
     [[ -n $session ]] || { echo "No dev session for $scope. Pass a repo/slot or session name."; return 1; }
   fi
 
-  tmux has-session -t "$session" 2>/dev/null || { echo "No such session: $session"; return 1; }
+  if ! tmux has-session -t "$session" 2>/dev/null; then
+    # Not live locally — the slot may be on a remote host. Parse repo/slot from the
+    # session name (split on the LAST dash, so multi-dash repos like dotfiles resolve)
+    # and delegate the pop to its host over ssh -t: it un-tmuxes THERE and you drive it
+    # through the ssh TTY — the same semantics as a local pop (closing ssh ends the
+    # foreground claude, exactly like a no-tmux local pop). Falls through to the local
+    # error only when the slot is live nowhere. (Reached only via the explicit
+    # `t pop <repo> <slot>` / `t pop dev-…` paths; bare `t pop` returns earlier.)
+    local rrepo="${session#dev-}" rslot; rslot="${rrepo##*-}"; rrepo="${rrepo%-*}"
+    _dev_remote_delegate "$rrepo" "$rslot" pop && return
+    echo "No such session: $session"; return 1
+  fi
   if [[ -n $TMUX && "$(tmux display-message -p '#S')" == "$session" ]]; then
     echo "You're inside $session right now — run tpop from a different terminal."; return 1
   fi

@@ -337,6 +337,12 @@ def cmd_read(cfg, args):
     slot = slot or "1"
     logfile = os.path.join(HOME, ".tmux-logs", f"dev-{args.repo}-{slot}.log")
     if not os.path.isfile(logfile):
+        # No log here — the slot may live on a remote host (the tmux log is host-local;
+        # csync syncs transcripts, not ~/.tmux-logs). Try delegating the read to that
+        # host over ssh -t, which renders the remote log in less through the ssh TTY.
+        # rc 0 = handled (or a no-TTY hint printed); rc 1 = live nowhere → local error.
+        if _try_remote_delegate(args.repo, slot, "read") == 0:
+            return 0
         print(f"No log found: {logfile}")
         print(f"(start a session with 't open {args.repo} {slot}' first)")
         return 1
@@ -353,6 +359,21 @@ def _delegate(snippet):
     end in a pager / tmux send-keys / tmux kill, all child-safe. (At hard cutover the
     target functions are renamed to internal _t_* helpers and these snippets follow.)"""
     os.execvp("zsh", ["zsh", "-lic", ZSH_PRELUDE + snippet])
+
+
+def _try_remote_delegate(repo, slot, verb):
+    """Run zsh `_dev_remote_delegate <repo> <slot> <verb>` (login+interactive) so a slot
+    that is live on a $REMOTE_HOSTS host is handled THERE over ssh -t — the same shared
+    helper `t plan`/`t pop` use. Unlike _delegate() this does NOT exec: it runs as a
+    child (inheriting the TTY so the remote pager/attach works) and RETURNS the rc, so
+    a bin-native verb can fall back to its local path. rc 0 = handled (or a no-TTY hint
+    was printed); rc 1 = no remote slot. Returns 1 if zsh is unavailable."""
+    snippet = "_dev_remote_delegate %s %s %s" % (
+        shlex.quote(repo), shlex.quote(slot), shlex.quote(verb))
+    try:
+        return subprocess.run(["zsh", "-lic", ZSH_PRELUDE + snippet]).returncode
+    except OSError:
+        return 1
 
 
 def cmd_plan(cfg, args):
