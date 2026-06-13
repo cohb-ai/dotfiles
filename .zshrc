@@ -1622,8 +1622,12 @@ _dev_remote_delegate() {
   for a in "$@"; do rcmd+=" ${(q)a}"; done
   echo "→ $host:dev-${prepo}-${pslot}" >&2
   _term_title "$host: $verb $prepo $pslot"
+  # Once the slot has resolved on a remote host, treat the delegation as handled
+  # regardless of ssh's exit — ssh/the remote verb prints its own errors, and we
+  # must not let the caller fall back to a misleading "No such session" message.
   ssh -t "$target" "zsh -lic ${(q)rcmd}"
   _term_title ""
+  return 0
 }
 
 # _dev_remote_kill <repo> <slot> <force> — `dev -r kill <repo> [slot]`: resolve a live
@@ -2798,7 +2802,10 @@ _t_open() {
   local -a a rest; local arg want_host= host=
   for arg in "$@"; do
     if [[ -n $want_host ]]; then host=$arg; want_host=; continue; fi
-    [[ $arg == --host ]] && { want_host=1; continue; }
+    case "$arg" in
+      --host)   want_host=1; continue ;;
+      --host=*) host=${arg#--host=}; continue ;;
+    esac
     rest+=("$arg")
     case "$arg" in
       --new)    a+=(new) ;;
@@ -2807,6 +2814,7 @@ _t_open() {
       *)        a+=("$arg") ;;
     esac
   done
+  [[ -n $want_host ]] && { echo "t open: --host requires a value" >&2; return 2; }
   if [[ -n $host ]]; then
     # The remote `t open` re-parses these positionals from $host's own $PWD
     # (login dir, not this laptop's repo tree), so apply _t_dev's repo-aware
