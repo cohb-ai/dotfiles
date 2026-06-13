@@ -1516,9 +1516,23 @@ _dev_remote_resolve() {
   # _dev_rows_all columns: host(1) sid(2) cwd(3) slot(4) state(5) context(6) summary(7)
   local rows; rows=$(_dev_rows_all 2>/dev/null | awk -F'\t' '$1 != "local"')
   [[ -n $rows ]] || { echo "dev: no live dev sessions on any remote host (\`dev ls -r\`)." >&2; return 1; }
+  # Match on the repo DIRECTORY (field 3 = session cwd), NOT the alias-derived
+  # slot label (field 4): the same repo dir can carry different DEV_REPOS aliases
+  # on different machines — a slot is `dev-dot-2` on mini but `dev-dotfiles-2`
+  # here, both keying ~/code/dotfiles — so an alias-string compare silently MISSES
+  # a slot that is genuinely live remotely, and `t open 2` then mints a duplicate
+  # LOCAL session (the bug this fixes). Repos live at the same ~/code/<name> path
+  # on every host, so the dir is the stable cross-host key; the slot NUMBER is
+  # field 4's trailing -N. Fall back to the legacy alias-string match only when
+  # the local alias has no dir (not a DEV_REPOS key here).
+  local dir="${DEV_REPOS[$repo]:-}"
   local match
   if [[ -z $repo ]]; then
     match=$rows                                                  # bare → all remote
+  elif [[ -n $dir && -n $slot ]]; then
+    match=$(print -r -- "$rows" | awk -F'\t' -v d="$dir" -v s="$slot" '$3==d && $4 ~ ("-" s "$")')
+  elif [[ -n $dir ]]; then
+    match=$(print -r -- "$rows" | awk -F'\t' -v d="$dir" '$3==d')
   elif [[ -n $slot ]]; then
     match=$(print -r -- "$rows" | awk -F'\t' -v w="${repo}-${slot}" '$4==w')
   else
