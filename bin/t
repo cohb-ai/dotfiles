@@ -370,6 +370,8 @@ def cmd_paste(cfg, args):
     parts = ["_t_paste"]
     if args.pick:
         parts.append("--pick")
+    if args.newest:
+        parts.append("--newest")
     if args.repo:
         parts.append(shlex.quote(args.repo))
     if args.slot:
@@ -494,6 +496,7 @@ Run `t <verb> -h` for a verb's own flags.""")
     sp.add_argument("repo", nargs="?")
     sp.add_argument("slot", nargs="?")
     sp.add_argument("-p", "--pick", action="store_true", help="fzf-pick the file instead of taking the newest")
+    sp.add_argument("-n", "--newest", action="store_true", help="skip the picker; take the newest file by mtime")
 
     sp = sub.add_parser("find", help="semantic search across saved sessions, then resume")
     sp.add_argument("-k", "--keyword", action="store_true", help="offline keyword ranking (no Sonnet)")
