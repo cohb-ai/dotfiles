@@ -340,29 +340,34 @@ _tpaste_claude_ready() {
   return 1
 }
 
-# tpaste — paste the latest iCloud Drive screenshot/doc path into a dev tmux session
+# tpaste — paste an iCloud Drive screenshot/doc path into a dev tmux session
 #
-# Usage: tpaste [-p] [repo] [slot]
+# Usage: tpaste [-n] [repo] [slot]
 #
 # Commands:
-#   tpaste          new session for the repo you're standing in, path queued
-#   tpaste 3        paste into this repo's slot 3 (repo inferred from $PWD)
-#   tpaste api      start a new api session and queue the path into it
-#   tpaste api 3    paste into dev-api-3 (creating it if it doesn't exist)
+#   tpaste          fzf-pick a file, new session for the repo you're standing in
+#   tpaste 3        pick a file, paste into this repo's slot 3 (repo from $PWD)
+#   tpaste api      pick a file, start a new api session and queue it
+#   tpaste api 3    pick a file, paste into dev-api-3 (creating it if needed)
 #
 # Options:
-#   -p, --pick   fzf-pick the file (newest first) instead of taking the newest
+#   -n, --newest   skip the picker; take the newest file by mtime (fast path)
+#   -p, --pick     accepted for back-compat (the picker is now the default)
 #
 # Covers images (png/jpg/jpeg/heic) and docs (pdf/txt/md/csv/docx) in the iCloud
-# Drive root; newest by mtime wins. Press Enter in the session to send it.
+# Drive root, newest first. The picker opens whenever there is a TTY + fzf; with
+# neither (or -n) it falls back to the newest file. Press Enter to send it.
 _t_paste() {
   [[ "$1" == -h || "$1" == --help ]] && { _help_for _t_paste; return 0; }
-  local pick=0 arg
+  # The picker is the default; -n/--newest forces the no-prompt fast path.
+  # -p/--pick is kept as a no-op so old muscle memory/scripts still work.
+  local newest=0 arg
   local -a _pos
   for arg in "$@"; do
     case "$arg" in
-      -p|--pick) pick=1 ;;
-      *)         _pos+=("$arg") ;;
+      -n|--newest) newest=1 ;;
+      -p|--pick)   ;;
+      *)           _pos+=("$arg") ;;
     esac
   done
   local repo="${_pos[1]}"
@@ -372,7 +377,7 @@ _t_paste() {
   if [[ "$repo" == <-> && -z "$slot" ]]; then slot=$repo; repo=$(_t_infer_repo "$slot"); fi
   [[ -z "$repo" ]] && repo=$(_t_infer_repo)
   if [[ -z "$repo" ]]; then
-    echo "Usage: tpaste [-p] [repo] [slot]   (no repo: the one \$PWD is in; repo: one of ${(k)DEV_REPOS:-(none configured — see ~/.zshrc.local)})"
+    echo "Usage: tpaste [-n] [repo] [slot]   (no repo: the one \$PWD is in; repo: one of ${(k)DEV_REPOS:-(none configured — see ~/.zshrc.local)})"
     return 1
   fi
 
@@ -401,18 +406,15 @@ _t_paste() {
     return 1
   fi
 
-  if (( pick )); then
-    if [[ -t 0 && -t 1 ]] && command -v fzf >/dev/null 2>&1; then
-      # ls -t sorts newest-first; show just the basename but return the full path
-      src=$(ls -t "${files[@]}" | fzf --prompt='tpaste> ' --height=40% --reverse \
-            --delimiter=/ --with-nth=-1) || { echo "Cancelled."; return 1; }
-    else
-      echo "tpaste -p needs a TTY and fzf — falling back to the newest file." >&2
-      pick=0
-    fi
+  # Picker by default: open fzf whenever we have a TTY + fzf, unless -n forced
+  # the fast path. No TTY/fzf (or -n) falls back to the newest file by mtime.
+  if (( ! newest )) && [[ -t 0 && -t 1 ]] && command -v fzf >/dev/null 2>&1; then
+    # ls -t sorts newest-first; show just the basename but return the full path
+    src=$(ls -t "${files[@]}" | fzf --prompt='tpaste> ' --height=40% --reverse \
+          --delimiter=/ --with-nth=-1) || { echo "Cancelled."; return 1; }
+  else
+    src=$(ls -t "${files[@]}" | head -1)
   fi
-  # newest by mtime
-  (( pick )) || src=$(ls -t "${files[@]}" | head -1)
 
   echo "Using: $src"
 
