@@ -343,8 +343,12 @@ _clawsync_periodic() {
   [[ -r "$stamp" ]] && last=$(<"$stamp")
   (( now - last >= interval )) || return
   print -r -- "$now" >| "$stamp"                              # stamp BEFORE the run (overlap guard)
+  # &! (background AND disown), not plain & — a plain & leaves the job in THIS
+  # interactive shell's job table, so monitor mode prints `[1] PID` at launch and
+  # `[1] + done  ( git -C … )` on the next prompt. &! keeps it out of the table
+  # entirely (csync above stays silent the same way, via its `( … & )` subshell form).
   ( git -C "$dir" diff --quiet && git -C "$dir" diff --cached --quiet \
-      && git -C "$dir" pull --ff-only --quiet ) >>"$HOME/Library/Logs/clawsync.log" 2>&1 &
+      && git -C "$dir" pull --ff-only --quiet ) >>"$HOME/Library/Logs/clawsync.log" 2>&1 &!
 }
 add-zsh-hook precmd _clawsync_periodic
 
@@ -1144,6 +1148,33 @@ _dev_kill() {
     repo=$(_t_infer_repo)
   fi
 
+  # A DEV_REPOS dir can carry several aliases (`dot` and `dotfiles` both key
+  # ~/code/dotfiles); a live local session is named after whichever alias started
+  # it. `t kill dotfiles 2` must therefore also reach `dev-dot-2` in the same
+  # tree — otherwise the name-prefix scan below finds nothing, the local live
+  # check in _dev_remote_delegate/_dev_session_remote_fallback (which both key
+  # off `dev-${repo}-${slot}`) also misses it, and kill delegates remotely while
+  # the local same-numbered session keeps running (violating one-live-owner).
+  # For a specific slot, canonicalize $repo to the sibling alias running it.
+  # For `all`/no-slot, union every sibling alias keyed to this dir so a mass
+  # kill reaches `dev-dot-1` AND `dev-dotfiles-2` in one tree (picking a single
+  # alias would silently leave sessions running under the others).
+  local -a _repos=( "$repo" )
+  if [[ -n ${DEV_REPOS[$repo]:-} ]]; then
+    local _kdir=${DEV_REPOS[$repo]} _kk
+    if [[ -n $slot && $slot != all ]]; then
+      for _kk in ${(k)DEV_REPOS}; do
+        [[ $_kk == $repo || ${DEV_REPOS[$_kk]} != $_kdir ]] && continue
+        tmux has-session -t "dev-${_kk}-${slot}" 2>/dev/null && { repo=$_kk; _repos=( $_kk ); break; }
+      done
+    else
+      for _kk in ${(k)DEV_REPOS}; do
+        [[ $_kk == $repo || ${DEV_REPOS[$_kk]} != $_kdir ]] && continue
+        _repos+=( $_kk )
+      done
+    fi
+  fi
+
   if [[ -z "$repo" ]]; then
     {
       print -r -- "t kill — tear down a dev session (or all of a repo's)"
@@ -1153,10 +1184,11 @@ _dev_kill() {
     return 1
   fi
 
-  # collect this repo's live sessions by name (dev-<repo>-<N>), numerically sorted
+  # collect this repo's live sessions by name (dev-<repo>-<N>), numerically sorted.
+  # For `all`/no-slot, $_repos is the union of sibling aliases sharing this dir.
   local -a sessions
   sessions=( ${(f)"$(tmux list-sessions -F '#{session_name}' 2>/dev/null \
-    | grep "^dev-${repo}-[0-9]\+\$" | sort -t- -k3 -n)"} )
+    | grep -E "^dev-(${(j:|:)_repos})-[0-9]+\$" | sort -t- -k3 -n)"} )
 
   if (( ! ${#sessions} )); then
     # None live HERE. If a specific slot was named and it is live on another host, tear
@@ -1407,6 +1439,20 @@ _t_dev() {
     return
   fi
 
+  # Same-dir sibling aliases (see _dev_kill / _t_pop): a `dev-dot-2` answers
+  # `t open dotfiles 2` when `dot` and `dotfiles` both key ~/code/dotfiles.
+  # Without this canonicalization the local live check below misses it and we
+  # either ssh to a remote slot of the same number or mint a duplicate local
+  # `dev-dotfiles-2`, violating the one-live-owner invariant for the slot.
+  if [[ -n $slot && $slot != new && $slot != fg && -n ${DEV_REPOS[$repo]:-} ]] \
+     && ! tmux has-session -t "dev-${repo}-${slot}" 2>/dev/null; then
+    local _odir=${DEV_REPOS[$repo]} _ok
+    for _ok in ${(k)DEV_REPOS}; do
+      [[ $_ok == $repo || ${DEV_REPOS[$_ok]} != $_odir ]] && continue
+      tmux has-session -t "dev-${_ok}-${slot}" 2>/dev/null && { repo=$_ok; break; }
+    done
+  fi
+
   # Remote-aware open (auto half): <repo> is a valid key now (cwd-defaulted if bare) and
   # fg adoption already returned, so a slot that is NOT live HERE but IS live on a
   # $REMOTE_HOSTS host gets attached IN PLACE there (host inferred) — a live LOCAL slot
@@ -1516,9 +1562,28 @@ _dev_remote_resolve() {
   # _dev_rows_all columns: host(1) sid(2) cwd(3) slot(4) state(5) context(6) summary(7)
   local rows; rows=$(_dev_rows_all 2>/dev/null | awk -F'\t' '$1 != "local"')
   [[ -n $rows ]] || { echo "dev: no live dev sessions on any remote host (\`dev ls -r\`)." >&2; return 1; }
+  # Match on the repo DIRECTORY (field 3 = session cwd), NOT the alias-derived
+  # slot label (field 4): the same repo dir can carry different DEV_REPOS aliases
+  # on different machines — a slot is `dev-dot-2` on mini but `dev-dotfiles-2`
+  # here, both keying ~/code/dotfiles — so an alias-string compare silently MISSES
+  # a slot that is genuinely live remotely, and `t open 2` then mints a duplicate
+  # LOCAL session (the bug this fixes). Repos live at the same ~/code/<name> path
+  # on every host, so the dir is the stable cross-host key; the slot NUMBER is
+  # field 4's trailing -N. Fall back to the legacy alias-string match only when
+  # the local alias has no dir (not a DEV_REPOS key here). The dir match also
+  # excludes FOREGROUND rows (labels like `<repo>:<id>` / `<repo>:fg`, marked by
+  # `:`) — they share the cwd but are bound to their terminal, not a tmux slot;
+  # admitting them would make the trailing-dash split below yield a bogus
+  # repo/slot pair (`dot:a4aa5f6a` has no `-`) and `_dev_remote_attach`/
+  # `_dev_remote_delegate` would ssh with a malformed `t` command.
+  local dir="${DEV_REPOS[$repo]:-}"
   local match
   if [[ -z $repo ]]; then
     match=$rows                                                  # bare → all remote
+  elif [[ -n $dir && -n $slot ]]; then
+    match=$(print -r -- "$rows" | awk -F'\t' -v d="$dir" -v s="$slot" '$3==d && $4 !~ /:/ && $4 ~ ("-" s "$")')
+  elif [[ -n $dir ]]; then
+    match=$(print -r -- "$rows" | awk -F'\t' -v d="$dir" '$3==d && $4 !~ /:/')
   elif [[ -n $slot ]]; then
     match=$(print -r -- "$rows" | awk -F'\t' -v w="${repo}-${slot}" '$4==w')
   else
@@ -1713,58 +1778,6 @@ _dev_session_remote_fallback() {
   _dev_remote_delegate "$repo" "$slot" "$verb" "$@"
 }
 
-# _dev_remote_open <host> [open-args…] — start/attach a session on a SPECIFIC host
-# (the `t open --host <h>` path). Unlike the `-r`/auto-detect attach — which only
-# reaches an ALREADY-LIVE remote slot (host inferred via _dev_remote_resolve) — this
-# forces <host>, so it can start a FRESH session there: `t open ff --host mini` opens a
-# new mini session, `t open ff 3 --host mini` its slot 3. ssh -t + remote `t open`
-# (zsh -lic for the Homebrew-tmux / interactive-claude PATH split); the session stays
-# on <host> (Ctrl-b d to detach). The repo must exist at the same ~/code path there.
-_dev_remote_open() {
-  local host="$1"; shift
-  local target="${REMOTE_HOSTS[$host]:-$host}"
-  if [[ ! -t 1 ]]; then
-    echo "t open --host: starting a session on $host needs a terminal." >&2
-    return 1
-  fi
-  local rcmd="t open"; local a
-  for a in "$@"; do rcmd+=" ${(q)a}"; done
-  echo "→ $host: $rcmd (stays on $host; Ctrl-b d to detach)"
-  _term_title "$host: open ${(j: :)@}"
-  ssh -t "$target" "zsh -lic ${(qq)rcmd}"
-  _term_title ""
-}
-
-# _dev_remote_delegate <repo> <slot> <verb> [extra…] — remote-aware shim for the
-# per-slot read verbs (plan/read/…). If dev-<repo>-<slot> is NOT live locally but IS
-# live on a $REMOTE_HOSTS host, run `t <verb> <repo> <slot> [extra]` there over ssh -t
-# and return 0 (handled); else return 1 so the caller falls back to its local path.
-# Needed because a beamed/remote slot's artifacts are host-local — the plan .md lives
-# in ~/.claude/plans and the tmux log in ~/.tmux-logs on the slot's host, neither of
-# which csync syncs — so the verb must run THERE. Host auto-inferred (_dev_remote_
-# resolve); no TTY → print a hint and still return 0 (do not fall through to a local
-# "No such session"). Mirrors _t_dev's auto-detect attach, but for non-attach verbs.
-_dev_remote_delegate() {
-  local repo="$1" slot="$2" verb="$3"; shift 3
-  (( ${#REMOTE_HOSTS} )) || return 1
-  [[ -n $repo ]] || return 1
-  _dev_local_slot_live "$repo" "$slot" && return 1
-  local res; res=$(_dev_remote_resolve "$repo" "$slot" 2>/dev/null) || return 1
-  [[ -n $res ]] || return 1
-  local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
-  local target="${REMOTE_HOSTS[$host]:-$host}"
-  if [[ ! -t 1 ]]; then
-    echo "t $verb: dev-${prepo}-${pslot} is live on $host — run it from a terminal (or \`t beam $prepo $pslot --from $host\` to pull it here)." >&2
-    return 0
-  fi
-  local rcmd="t $verb ${(q)prepo} ${(q)pslot}"; local a
-  for a in "$@"; do rcmd+=" ${(q)a}"; done
-  echo "→ $host:dev-${prepo}-${pslot}" >&2
-  _term_title "$host: $verb $prepo $pslot"
-  ssh -t "$target" "zsh -lic ${(qq)rcmd}"
-  _term_title ""
-}
-
 # _dev_remote_kill <repo> <slot> <force> — `dev -r kill <repo> [slot]`: resolve a live
 # REMOTE slot (host auto-inferred / fzf-picked, _dev_remote_resolve) and tear it down
 # ON that host by running `dev kill <repo> <slot>` there over ssh -t (so its confirm
@@ -1784,16 +1797,46 @@ _dev_remote_kill() {
   # delegate `t kill <repo> all` to each — the remote _dev_kill iterates its own.
   if [[ $slot == all ]]; then
     [[ -n $repo ]] || { echo "dev: kill --remote all needs a repo (none inferred from \$PWD)." >&2; return 1; }
-    local hosts; hosts=$(_dev_rows_all 2>/dev/null \
-      | awk -F'\t' -v w="${repo}-" '$1 != "local" && index($4,w)==1 {print $1}' | sort -u)
-    [[ -n $hosts ]] || { echo "dev: no live '$repo' sessions on any remote host (\`dev ls -r\`)." >&2; return 1; }
-    local h rtarget rcmd="t kill ${(q)repo} all" rc=0
-    [[ -n $force ]] && rcmd+=" -y"
-    for h in ${(f)hosts}; do
+    # Discover hosts by repo DIRECTORY (field 3), not the alias-derived slot label
+    # (field 4) — same reason _dev_remote_resolve does: a slot is `dev-dot-2` on
+    # mini but `dev-dotfiles-2` here, both keying ~/code/dotfiles, so an alias
+    # compare silently misses cross-host slots. Exclude foreground rows (`:` in
+    # field 4). For each match keep the REMOTE's alias (slot field's prefix, last
+    # dash split) so the delegated `t kill` keys off a name that exists there —
+    # passing our local alias would have remote `_dev_kill` grep for sessions it
+    # does not have. (Remote `_dev_kill` already unions sibling aliases for `all`
+    # — see lines 1162–1175 — so one alias per host is enough to reach every slot
+    # in that tree.) Fall back to the alias-string match when the local alias has
+    # no DEV_REPOS dir.
+    local dir="${DEV_REPOS[$repo]:-}"
+    local pairs
+    if [[ -n $dir ]]; then
+      pairs=$(_dev_rows_all 2>/dev/null \
+        | awk -F'\t' -v d="$dir" '$1 != "local" && $3==d && $4 !~ /:/ {
+            a=$4; sub(/-[0-9]+$/, "", a);
+            print $1 "\t" a
+          }' | awk -F'\t' '!seen[$1]++')
+    else
+      pairs=$(_dev_rows_all 2>/dev/null \
+        | awk -F'\t' -v r="$repo" -v w="${repo}-" '$1 != "local" && index($4,w)==1 {print $1 "\t" r}' \
+        | awk -F'\t' '!seen[$1]++')
+    fi
+    [[ -n $pairs ]] || { echo "dev: no live '$repo' sessions on any remote host (\`dev ls -r\`)." >&2; return 1; }
+    local pair h ralias rtarget rcmd rc=0
+    for pair in ${(f)pairs}; do
+      h=${pair%%$'\t'*}
+      ralias=${pair#*$'\t'}
       rtarget="${REMOTE_HOSTS[$h]:-$h}"
-      echo "→ Killing all dev-${repo}-* on $h"
-      _term_title "$h: kill $repo all"
-      ssh -t "$rtarget" "zsh -lic ${(qq)rcmd}" || rc=$?
+      rcmd="t kill ${(q)ralias} all"
+      [[ -n $force ]] && rcmd+=" -y"
+      echo "→ Killing all dev-${ralias}-* on $h"
+      _term_title "$h: kill $ralias all"
+      # rc is a sticky failure flag — set on any host failure and never reset on
+      # a later success — so the final exit is a clean boolean over the whole
+      # fan-out (any host failed → non-zero). Was rc=$?: that captured the last
+      # failure's exact code but never cleared on success, which made the value
+      # arbitrary across iterations.
+      ssh -t "$rtarget" "zsh -lic ${(qq)rcmd}" || rc=1
     done
     _term_title ""
     return $rc
@@ -2513,11 +2556,31 @@ _t_pop() {
       slot=$repo
       repo=$(_t_infer_repo "$slot") || { echo "Not inside a DEV_REPOS dir — name the repo (t pop <repo> $slot)."; return 1; }
     fi
+    # Same-dir sibling aliases (see _dev_kill): a `dev-dot-2` answers `t pop
+    # dotfiles 2` when `dot` and `dotfiles` both key ~/code/dotfiles. Without this
+    # the lookup misses the local slot and _dev_session_remote_fallback can pop
+    # it on another host while the local copy keeps running.
+    local -a _palias=( "$repo" )
+    if [[ -n ${DEV_REPOS[$repo]:-} ]]; then
+      local _pdir=${DEV_REPOS[$repo]} _pk
+      for _pk in ${(k)DEV_REPOS}; do
+        [[ $_pk == $repo || ${DEV_REPOS[$_pk]} != $_pdir ]] && continue
+        _palias+=( $_pk )
+      done
+    fi
     if [[ -z "$slot" ]]; then                      # first existing slot for repo
-      local n=1
+      local n=1 a
       while (( n <= 20 )); do
-        tmux has-session -t "dev-${repo}-${n}" 2>/dev/null && { slot=$n; break; }
+        for a in $_palias; do
+          tmux has-session -t "dev-${a}-${n}" 2>/dev/null && { repo=$a; slot=$n; break 2; }
+        done
         (( n++ ))
+      done
+    elif (( ${#_palias} > 1 )) && ! tmux has-session -t "dev-${repo}-${slot}" 2>/dev/null; then
+      local a
+      for a in $_palias; do
+        [[ $a == $repo ]] && continue
+        tmux has-session -t "dev-${a}-${slot}" 2>/dev/null && { repo=$a; break; }
       done
     fi
     session="dev-${repo}-${slot}"

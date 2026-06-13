@@ -352,6 +352,21 @@ def cmd_read(cfg, args):
     dump = args.dump or args.tail is not None
     logfile = os.path.join(HOME, ".tmux-logs", f"dev-{args.repo}-{slot}.log")
     if not os.path.isfile(logfile):
+        # Same-dir sibling aliases (mirrors _dev_kill / _t_pop): `dot` and
+        # `dotfiles` both key ~/code/dotfiles, so `t read dotfiles 2` should
+        # also reach `dev-dot-2.log` here before delegating to a remote host.
+        # _infer_repo already does this when the repo arg is omitted; this
+        # handles an explicitly-named repo too.
+        d = cfg.repos.get(args.repo, "")
+        if d:
+            for k, v in cfg.repos.items():
+                if k == args.repo or v != d:
+                    continue
+                sib = os.path.join(HOME, ".tmux-logs", f"dev-{k}-{slot}.log")
+                if os.path.isfile(sib):
+                    args.repo, logfile = k, sib
+                    break
+    if not os.path.isfile(logfile):
         # No log here — the slot may live on a remote host (the tmux log is host-local;
         # csync syncs transcripts, not ~/.tmux-logs). Try delegating the read to that
         # host over ssh -t, which renders the remote log in less through the ssh TTY.
