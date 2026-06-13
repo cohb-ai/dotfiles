@@ -1135,7 +1135,16 @@ _dev_kill() {
     | grep "^dev-${repo}-[0-9]\+\$" | sort -t- -k3 -n)"} )
 
   if (( ! ${#sessions} )); then
-    echo "No sessions for '$repo'."
+    # None live HERE. If a specific slot was named and it is live on another host, tear
+    # it down there over ssh -t (the remote `t kill` still prompts unless -y); -r forces
+    # this explicitly. With no slot, never auto-pick a kill target — just point at where
+    # to look.
+    if [[ -n $slot && $slot != all ]]; then
+      _dev_remote_delegate "$repo" "$slot" kill ${force:+-y} && return
+    fi
+    echo "No sessions for '$repo' here."
+    [[ -z $slot || $slot == all ]] && (( ${#REMOTE_HOSTS} )) && \
+      echo "(check other hosts: \`t ls -r\`; kill there with \`t kill -r $repo${slot:+ $slot}\`)"
     return 1
   fi
 
@@ -1158,6 +1167,9 @@ _dev_kill() {
 
   local session="dev-${repo}-${slot}"
   if ! tmux has-session -t "$session" 2>/dev/null; then
+    # Live on another host? Tear it down there (shared fallback; remote `t kill` still
+    # confirms unless -y). Same remote detection pop/plan get; -r forces it explicitly.
+    _dev_session_remote_fallback "$session" kill ${force:+-y} && return
     echo "No session: $session"
     return 1
   fi
@@ -1648,6 +1660,20 @@ _dev_remote_delegate() {
   return 0
 }
 
+# _dev_session_remote_fallback <session-name> <verb> [extra…] — the ONE shared
+# "not live HERE, maybe live on another host" check that every per-slot verb routes
+# its local miss through, so remote detection is uniform (pop/plan/kill all call this;
+# t open uses the attach-flavoured _dev_remote_attach; t read is bin-native and calls
+# _try_remote_delegate). Splits repo/slot off the dev-<repo>-<slot> name on the LAST
+# dash (so multi-dash repos like dotfiles resolve) and hands them to
+# _dev_remote_delegate. Returns 0 = handled on the slot's host over ssh -t (caller
+# should `return`); 1 = no remote slot (caller falls through to its local error).
+_dev_session_remote_fallback() {
+  local session="$1" verb="$2"; shift 2
+  local repo=${${session#dev-}%-*} slot=${session##*-}
+  _dev_remote_delegate "$repo" "$slot" "$verb" "$@"
+}
+
 # _dev_remote_kill <repo> <slot> <force> — `dev -r kill <repo> [slot]`: resolve a live
 # REMOTE slot (host auto-inferred / fzf-picked, _dev_remote_resolve) and tear it down
 # ON that host by running `dev kill <repo> <slot>` there over ssh -t (so its confirm
@@ -1815,10 +1841,10 @@ _t_plan() {
     fi
     if ! tmux has-session -t "$session" 2>/dev/null; then
       # Not live here — maybe beamed to / started on another host. Delegate the whole
-      # `t plan` over there: the plan .md lives in that host's ~/.claude/plans (csync
-      # syncs transcripts, not plan files), so it must be rendered on the slot's host.
-      local rrepo=${${session#dev-}%-*} rslot=${session##*-}
-      _dev_remote_delegate "$rrepo" "$rslot" plan && return
+      # `t plan` over there (shared _dev_session_remote_fallback): the plan .md lives in
+      # that host's ~/.claude/plans (csync syncs transcripts, not plan files), so it
+      # must be rendered on the slot's host.
+      _dev_session_remote_fallback "$session" plan && return
       echo "No such session: $session" >&2; return 1
     fi
     sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
@@ -2410,19 +2436,23 @@ _t_pop() {
       d=$(tmux display-message -p -t "$s" '#{session_path}')
       [[ $d == $scope || $d == $scope/* ]] && { session="$s"; break; }
     done
-    [[ -n $session ]] || { echo "No dev session for $scope. Pass a repo/slot or session name."; return 1; }
+    if [[ -z $session ]]; then
+      # Nothing live HERE — a slot of this repo may be live on another host. Infer the
+      # repo from $PWD and let _dev_remote_delegate resolve/pop it over there (empty
+      # slot → it picks the repo's remote slot, fzf-picks if several). Same remote
+      # detection the explicit `t pop <repo> <slot>` path gets, now for bare `t pop`.
+      local repo; repo=$(_t_infer_repo) && _dev_remote_delegate "$repo" "" pop && return
+      echo "No dev session for $scope (here or on any remote host). Pass a repo/slot or session name."; return 1
+    fi
   fi
 
   if ! tmux has-session -t "$session" 2>/dev/null; then
-    # Not live locally — the slot may be on a remote host. Parse repo/slot from the
-    # session name (split on the LAST dash, so multi-dash repos like dotfiles resolve)
-    # and delegate the pop to its host over ssh -t: it un-tmuxes THERE and you drive it
-    # through the ssh TTY — the same semantics as a local pop (closing ssh ends the
+    # Not live locally — the slot may be on a remote host. Delegate the pop to its host
+    # over ssh -t (shared _dev_session_remote_fallback): it un-tmuxes THERE and you drive
+    # it through the ssh TTY — the same semantics as a local pop (closing ssh ends the
     # foreground claude, exactly like a no-tmux local pop). Falls through to the local
-    # error only when the slot is live nowhere. (Reached only via the explicit
-    # `t pop <repo> <slot>` / `t pop dev-…` paths; bare `t pop` returns earlier.)
-    local rrepo="${session#dev-}" rslot; rslot="${rrepo##*-}"; rrepo="${rrepo%-*}"
-    _dev_remote_delegate "$rrepo" "$rslot" pop && return
+    # error only when the slot is live nowhere.
+    _dev_session_remote_fallback "$session" pop && return
     echo "No such session: $session"; return 1
   fi
   if [[ -n $TMUX && "$(tmux display-message -p '#S')" == "$session" ]]; then
