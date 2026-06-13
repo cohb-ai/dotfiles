@@ -435,6 +435,7 @@ examples:
   t open api 3 --new      force a fresh session in api slot 3
   t open                  open/reattach in the repo cwd is in
   t paste 4               slot-only args mean the cwd repo (all verbs)
+  t open ff --host mini   start/attach a session on 'mini' (opens a NEW remote one)
   t open a4aa5f6a         adopt a foreground (:fg) session here (id from t ls)
   t ls                    list this repo's live sessions
   t ls -r                 list live sessions across every machine
@@ -453,6 +454,7 @@ Run `t <verb> -h` for a verb's own flags.""")
     sp.add_argument("--new", action="store_true", help="force a fresh session")
     sp.add_argument("--fg", action="store_true", help="no tmux: foreground-resume / run inline")
     sp.add_argument("-r", "--remote", action="store_true", help="force the remote branch (a remote-only slot is auto-attached without this)")
+    sp.add_argument("--host", help="start/attach on this host (the way to open a NEW remote session)")
 
     sp = sub.add_parser("ls", help="list dev sessions (attached + active context)")
     sp.add_argument("-r", "--remote", action="store_true", help="span every $REMOTE_HOSTS host")

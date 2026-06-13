@@ -1330,6 +1330,7 @@ _t_dev() {
       print -r -- "  t open <id> | <repo> fg     adopt a foreground (:fg) session here (id from t ls)"
       print -r -- "  t open <repo> [slot] --fg   no tmux: foreground-resume / run inline"
       print -r -- "  t open <repo> [slot]        auto-attaches on another host if the slot is live there"
+      print -r -- "  t open <repo> [slot] --host <host>   start/attach on <host> (opens a NEW remote session)"
       print -r -- "  t beam <repo> [slot] --from <host>   pull that session HERE (move); omit --from to send"
       print -r -- "  t ls [-r] [-a]              list sessions (attached + active context)"
       print -r -- "  t kill <repo> <slot|all>    tear down a session (-y to skip the confirm)"
@@ -1573,6 +1574,58 @@ _dev_remote_attach() {
   _term_title ""
 }
 
+# _dev_remote_open <host> [open-args…] — start/attach a session on a SPECIFIC host
+# (the `t open --host <h>` path). Unlike the `-r`/auto-detect attach — which only
+# reaches an ALREADY-LIVE remote slot (host inferred via _dev_remote_resolve) — this
+# forces <host>, so it can start a FRESH session there: `t open ff --host mini` opens a
+# new mini session, `t open ff 3 --host mini` its slot 3. ssh -t + remote `t open`
+# (zsh -lic for the Homebrew-tmux / interactive-claude PATH split); the session stays
+# on <host> (Ctrl-b d to detach). The repo must exist at the same ~/code path there.
+_dev_remote_open() {
+  local host="$1"; shift
+  local target="${REMOTE_HOSTS[$host]:-$host}"
+  if [[ ! -t 1 ]]; then
+    echo "t open --host: starting a session on $host needs a terminal." >&2
+    return 1
+  fi
+  local rcmd="t open"; local a
+  for a in "$@"; do rcmd+=" ${(q)a}"; done
+  echo "→ $host: $rcmd (stays on $host; Ctrl-b d to detach)"
+  _term_title "$host: open ${(j: :)@}"
+  ssh -t "$target" "zsh -lic ${(q)rcmd}"
+  _term_title ""
+}
+
+# _dev_remote_delegate <repo> <slot> <verb> [extra…] — remote-aware shim for the
+# per-slot read verbs (plan/read/…). If dev-<repo>-<slot> is NOT live locally but IS
+# live on a $REMOTE_HOSTS host, run `t <verb> <repo> <slot> [extra]` there over ssh -t
+# and return 0 (handled); else return 1 so the caller falls back to its local path.
+# Needed because a beamed/remote slot's artifacts are host-local — the plan .md lives
+# in ~/.claude/plans and the tmux log in ~/.tmux-logs on the slot's host, neither of
+# which csync syncs — so the verb must run THERE. Host auto-inferred (_dev_remote_
+# resolve); no TTY → print a hint and still return 0 (do not fall through to a local
+# "No such session"). Mirrors _t_dev's auto-detect attach, but for non-attach verbs.
+_dev_remote_delegate() {
+  local repo="$1" slot="$2" verb="$3"; shift 3
+  (( ${#REMOTE_HOSTS} )) || return 1
+  [[ -n $repo ]] || return 1
+  _dev_local_slot_live "$repo" "$slot" && return 1
+  local res; res=$(_dev_remote_resolve "$repo" "$slot" 2>/dev/null) || return 1
+  [[ -n $res ]] || return 1
+  local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
+  local target="${REMOTE_HOSTS[$host]:-$host}"
+  if [[ ! -t 1 ]]; then
+    echo "t $verb: dev-${prepo}-${pslot} is live on $host — run it from a terminal (or \`t beam $prepo $pslot --from $host\` to pull it here)." >&2
+    return 0
+  fi
+  local rcmd="t $verb ${(q)prepo} ${(q)pslot}"; local a
+  for a in "$@"; do rcmd+=" ${(q)a}"; done
+  echo "→ $host:dev-${prepo}-${pslot}" >&2
+  _term_title "$host: $verb $prepo $pslot"
+  ssh -t "$target" "zsh -lic ${(q)rcmd}"
+  _term_title ""
+}
+
 # _dev_remote_kill <repo> <slot> <force> — `dev -r kill <repo> [slot]`: resolve a live
 # REMOTE slot (host auto-inferred / fzf-picked, _dev_remote_resolve) and tear it down
 # ON that host by running `dev kill <repo> <slot>` there over ssh -t (so its confirm
@@ -1738,7 +1791,14 @@ _t_plan() {
       fi
       session="dev-${repo}-${slot}"
     fi
-    tmux has-session -t "$session" 2>/dev/null || { echo "No such session: $session" >&2; return 1; }
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+      # Not live here — maybe beamed to / started on another host. Delegate the whole
+      # `t plan` over there: the plan .md lives in that host's ~/.claude/plans (csync
+      # syncs transcripts, not plan files), so it must be rendered on the slot's host.
+      local rrepo=${${session#dev-}%-*} rslot=${session##*-}
+      _dev_remote_delegate "$rrepo" "$rslot" plan && return
+      echo "No such session: $session" >&2; return 1
+    fi
     sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
     if [[ -z $sid ]]; then
       local dir; dir=$(tmux display-message -p -t "$session" '#{session_path}')
@@ -2728,12 +2788,18 @@ t() {
   esac
 }
 
-# _t_open — map gh-grammar `t open <repo> [slot] [--new|--fg|--remote]` onto the
-# existing `dev` grammar: --new→the `new` slot keyword, --fg→-f, --remote→-r;
-# repo/slot/-r/-f pass through (dev parses flags in any position).
+# _t_open — map gh-grammar `t open <repo> [slot] [--new|--fg|--remote] [--host H]`
+# onto the existing `dev` grammar: --new→the `new` slot keyword, --fg→-f, --remote→-r;
+# repo/slot/-r/-f pass through (dev parses flags in any position). `--host H` forces a
+# FRESH-or-attach session ON host H (the only way to START a remote session — `-r`/
+# auto-detect only reach an already-live slot) and is dispatched via _dev_remote_open
+# with the original gh-style args (minus --host), so H's own `t open` re-parses them.
 _t_open() {
-  local -a a; local arg
+  local -a a rest; local arg want_host= host=
   for arg in "$@"; do
+    if [[ -n $want_host ]]; then host=$arg; want_host=; continue; fi
+    [[ $arg == --host ]] && { want_host=1; continue; }
+    rest+=("$arg")
     case "$arg" in
       --new)    a+=(new) ;;
       --fg)     a+=(-f) ;;
@@ -2741,6 +2807,10 @@ _t_open() {
       *)        a+=("$arg") ;;
     esac
   done
+  if [[ -n $host ]]; then
+    _dev_remote_open "$host" "${rest[@]}"
+    return
+  fi
   _t_dev "${a[@]}"
 }
 
