@@ -1648,16 +1648,16 @@ _dev_remote_kill() {
     local hosts; hosts=$(_dev_rows_all 2>/dev/null \
       | awk -F'\t' -v w="${repo}-" '$1 != "local" && index($4,w)==1 {print $1}' | sort -u)
     [[ -n $hosts ]] || { echo "dev: no live '$repo' sessions on any remote host (\`dev ls -r\`)." >&2; return 1; }
-    local h rtarget rcmd="t kill ${(q)repo} all"
+    local h rtarget rcmd="t kill ${(q)repo} all" rc=0
     [[ -n $force ]] && rcmd+=" -y"
     for h in ${(f)hosts}; do
       rtarget="${REMOTE_HOSTS[$h]:-$h}"
       echo "→ Killing all dev-${repo}-* on $h"
       _term_title "$h: kill $repo all"
-      ssh -t "$rtarget" "zsh -lic ${(q)rcmd}"
+      ssh -t "$rtarget" "zsh -lic ${(q)rcmd}" || rc=$?
     done
     _term_title ""
-    return
+    return $rc
   fi
   local res; res=$(_dev_remote_resolve "$repo" "$slot") || return 1
   local host=${res%%$'\t'*} prepo=${${res#*$'\t'}%%$'\t'*} pslot=${res##*$'\t'}
@@ -2808,6 +2808,28 @@ _t_open() {
     esac
   done
   if [[ -n $host ]]; then
+    # The remote `t open` re-parses these positionals from $host's own $PWD
+    # (login dir, not this laptop's repo tree), so apply _t_dev's repo-aware
+    # rewrite HERE — a lone slot/keyword or bare `t open --host h` would
+    # otherwise hit the wrong repo (or none) on the far side.
+    local -a flags pos
+    for arg in "${rest[@]}"; do
+      case "$arg" in
+        --*) flags+=("$arg") ;;
+        *)   pos+=("$arg") ;;
+      esac
+    done
+    local p1=${pos[1]:-} p2=${pos[2]:-}
+    if [[ -z ${DEV_REPOS[$p1]:-} && ( $p1 == <-> || $p1 == new || $p1 == fg ) \
+          && ( -z $p2 || $p2 == new || $p2 == fg ) ]]; then
+      p2=$p1; p1=
+    fi
+    [[ -z $p1 ]] && p1=$(_t_infer_repo "$p2")
+    rest=()
+    [[ -n $p1 ]] && rest+=("$p1")
+    [[ -n $p2 ]] && rest+=("$p2")
+    (( ${#pos} > 2 )) && rest+=("${pos[@]:2}")
+    rest+=("${flags[@]}")
     _dev_remote_open "$host" "${rest[@]}"
     return
   fi
