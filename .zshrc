@@ -1605,8 +1605,10 @@ _dev_remote_attach() {
   local rcmd="t open ${(q)prepo} ${(q)pslot}"
   [[ -n $fg ]] && rcmd+=" --fg"
   _term_title "$host: $prepo $pslot"
-  ssh -t "$target" "zsh -lic ${(qq)rcmd}"
+  local rc=0
+  ssh -t "$target" "zsh -lic ${(qq)rcmd}" || rc=$?
   _term_title ""
+  return $rc
 }
 
 # _dev_remote_open <host> [open-args…] — start/attach a session on a SPECIFIC host
@@ -1627,8 +1629,10 @@ _dev_remote_open() {
   for a in "$@"; do rcmd+=" ${(q)a}"; done
   echo "→ $host: $rcmd (stays on $host; Ctrl-b d to detach)"
   _term_title "$host: open ${(j: :)@}"
-  ssh -t "$target" "zsh -lic ${(qq)rcmd}"
+  local rc=0
+  ssh -t "$target" "zsh -lic ${(qq)rcmd}" || rc=$?
   _term_title ""
+  return $rc
 }
 
 # _dev_remote_delegate <repo> <slot> <verb> [extra…] — remote-aware shim for the
@@ -1725,8 +1729,10 @@ _dev_remote_kill() {
   local rcmd="t kill ${(q)prepo} ${(q)pslot}"
   [[ -n $force ]] && rcmd+=" -y"
   _term_title "$host: kill $prepo $pslot"
-  ssh -t "$target" "zsh -lic ${(qq)rcmd}"
+  local rc=0
+  ssh -t "$target" "zsh -lic ${(qq)rcmd}" || rc=$?
   _term_title ""
+  return $rc
 }
 
 # _dev_pull <host> <target> <repo> <slot> <fg> — pull a remote dev slot's session
