@@ -343,8 +343,12 @@ _clawsync_periodic() {
   [[ -r "$stamp" ]] && last=$(<"$stamp")
   (( now - last >= interval )) || return
   print -r -- "$now" >| "$stamp"                              # stamp BEFORE the run (overlap guard)
+  # &! (background AND disown), not plain & — a plain & leaves the job in THIS
+  # interactive shell's job table, so monitor mode prints `[1] PID` at launch and
+  # `[1] + done  ( git -C … )` on the next prompt. &! keeps it out of the table
+  # entirely (csync above stays silent the same way, via its `( … & )` subshell form).
   ( git -C "$dir" diff --quiet && git -C "$dir" diff --cached --quiet \
-      && git -C "$dir" pull --ff-only --quiet ) >>"$HOME/Library/Logs/clawsync.log" 2>&1 &
+      && git -C "$dir" pull --ff-only --quiet ) >>"$HOME/Library/Logs/clawsync.log" 2>&1 &!
 }
 add-zsh-hook precmd _clawsync_periodic
 
