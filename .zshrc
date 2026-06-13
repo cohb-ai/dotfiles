@@ -1144,6 +1144,27 @@ _dev_kill() {
     repo=$(_t_infer_repo)
   fi
 
+  # A DEV_REPOS dir can carry several aliases (`dot` and `dotfiles` both key
+  # ~/code/dotfiles); a live local session is named after whichever alias started
+  # it. `t kill dotfiles 2` must therefore also reach `dev-dot-2` in the same
+  # tree — otherwise the name-prefix scan below finds nothing, the local live
+  # check in _dev_remote_delegate/_dev_session_remote_fallback (which both key
+  # off `dev-${repo}-${slot}`) also misses it, and kill delegates remotely while
+  # the local same-numbered session keeps running (violating one-live-owner).
+  # Canonicalize to the sibling alias actually in use here for this slot.
+  if [[ -n ${DEV_REPOS[$repo]:-} ]]; then
+    local _kdir=${DEV_REPOS[$repo]} _kk
+    for _kk in ${(k)DEV_REPOS}; do
+      [[ $_kk == $repo || ${DEV_REPOS[$_kk]} != $_kdir ]] && continue
+      if [[ -n $slot && $slot != all ]]; then
+        tmux has-session -t "dev-${_kk}-${slot}" 2>/dev/null && { repo=$_kk; break; }
+      else
+        tmux list-sessions -F '#{session_name}' 2>/dev/null \
+          | grep -q "^dev-${_kk}-[0-9]\+\$" && { repo=$_kk; break; }
+      fi
+    done
+  fi
+
   if [[ -z "$repo" ]]; then
     {
       print -r -- "t kill — tear down a dev session (or all of a repo's)"
@@ -1524,15 +1545,20 @@ _dev_remote_resolve() {
   # LOCAL session (the bug this fixes). Repos live at the same ~/code/<name> path
   # on every host, so the dir is the stable cross-host key; the slot NUMBER is
   # field 4's trailing -N. Fall back to the legacy alias-string match only when
-  # the local alias has no dir (not a DEV_REPOS key here).
+  # the local alias has no dir (not a DEV_REPOS key here). The dir match also
+  # excludes FOREGROUND rows (labels like `<repo>:<id>` / `<repo>:fg`, marked by
+  # `:`) — they share the cwd but are bound to their terminal, not a tmux slot;
+  # admitting them would make the trailing-dash split below yield a bogus
+  # repo/slot pair (`dot:a4aa5f6a` has no `-`) and `_dev_remote_attach`/
+  # `_dev_remote_delegate` would ssh with a malformed `t` command.
   local dir="${DEV_REPOS[$repo]:-}"
   local match
   if [[ -z $repo ]]; then
     match=$rows                                                  # bare → all remote
   elif [[ -n $dir && -n $slot ]]; then
-    match=$(print -r -- "$rows" | awk -F'\t' -v d="$dir" -v s="$slot" '$3==d && $4 ~ ("-" s "$")')
+    match=$(print -r -- "$rows" | awk -F'\t' -v d="$dir" -v s="$slot" '$3==d && $4 !~ /:/ && $4 ~ ("-" s "$")')
   elif [[ -n $dir ]]; then
-    match=$(print -r -- "$rows" | awk -F'\t' -v d="$dir" '$3==d')
+    match=$(print -r -- "$rows" | awk -F'\t' -v d="$dir" '$3==d && $4 !~ /:/')
   elif [[ -n $slot ]]; then
     match=$(print -r -- "$rows" | awk -F'\t' -v w="${repo}-${slot}" '$4==w')
   else
