@@ -136,76 +136,92 @@ prview() {
 # exit/Ctrl-C. For a backgrounded, persistent block use `sleep-manager` instead.
 nosleep() { [[ "$1" == -h || "$1" == --help ]] && { _help_for nosleep; return 0; }; trap 'sudo pmset -a disablesleep 0' EXIT INT; sudo pmset -a disablesleep 1 && caffeinate -dimsu; }
 
-# dots — sync your dotfiles to origin/main HEAD and reload zsh
+# dots — update your LIVE dotfiles to origin/main and reload zsh
 #
 # Usage: dots [--dev]
 #
-# Default: fetches origin/main, switches to the main branch, fast-forwards it to
-# origin/main HEAD, and re-sources ~/.zshrc — so your live dotfiles become exactly
-# what is published on main, with nothing done locally (no merge, no commit). main
-# is protected (you never commit to it directly), so the fast-forward always
-# applies. Leaves you on main; develop on the dev branch via `t open dotfiles`.
-# Safe: stops and only reloads if the working tree has uncommitted edits, so it
-# never discards work — commit or stash first.
+# The live surface (what $HOME symlinks point at) is a dedicated git worktree pinned
+# to `main`, separate from the clone you develop in (see the symlink-model note in
+# CLAUDE.md). Default `dots` fast-forwards THAT worktree to origin/main and re-sources
+# ~/.zshrc — so your live config becomes exactly what is published on main. It never
+# touches your dev clone, never switches your branch, and so can NOT blast away
+# in-progress work: develop on the dev branch via `t open dotfiles`, run `dots` to
+# pull released updates whenever, in any order. (First run on an old single-tree
+# machine migrates it: moves the clone off main and sets the worktree up.)
 #
-# --dev (-d): install from whatever branch is checked out NOW instead — re-runs
-# install.sh (relinks any new/renamed files) and reloads, without fetching or
-# switching branches. Use it to apply in-progress dev work (e.g. a new bin script
-# that needs a fresh symlink) before it lands on main. Skips brew bundle.
+# --dev (-d): flip the live surface to your DEV clone (current branch) instead —
+# re-links from it (catching new/renamed files) and reloads, so in-progress edits go
+# live for testing without merging. A later plain `dots` flips live back to the main
+# worktree. Skips brew bundle.
 dots() {
   [[ "$1" == -h || "$1" == --help ]] && { _help_for dots; return 0; }
-  # Resolve the repo from the ~/.zshrc symlink (:A follows it to the real path,
-  # :h takes its dir) so this works wherever the repo was cloned — install.sh is
-  # location-independent, so don't hardcode ~/code/dotfiles.
-  local dotdir="${${:-$HOME/.zshrc}:A:h}"
-  cd "$dotdir" || return
 
-  local g c y b r0=
-  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; b=$'\e[1m'; r0=$'\e[0m'; fi
+  local g c y r0=
+  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; r0=$'\e[0m'; fi
+
+  # The live surface — resolve the ~/.zshrc symlink to its real dir (:A follows the
+  # link + absolutizes, :h takes the dirname). After migration this IS the main
+  # worktree; on an un-migrated machine it is still the single clone.
+  local live="${${:-$HOME/.zshrc}:A:h}"
+  # The dev clone = parent of the shared .git common dir (works from any worktree).
+  local commondir=$(git -C "$live" rev-parse --git-common-dir 2>/dev/null)
+  [[ $commondir == /* ]] || commondir="$live/$commondir"
+  local devclone="${commondir:A:h}"
+  local mainwt="${DOTFILES_MAIN_WT:-$HOME/.local/share/dotfiles-main}"
 
   if [[ "$1" == --dev || "$1" == -d ]]; then
-    # Install from the current branch: relink (catches new files), no git, no brew.
-    local branch=$(git symbolic-ref --short -q HEAD)
+    # Point the live symlinks at the dev clone (current branch); relink, no brew.
+    local branch=$(git -C "$devclone" symbolic-ref --short -q HEAD)
     local out
-    if out=$(DOTFILES_NO_BREW=1 ./install.sh 2>&1); then
-      print -r -- "${g}✓${r0} ${y}installed from ${c}${branch}${r0} ${y}(current branch) — reloaded${r0}"
+    if out=$(DOTFILES_NO_BREW=1 DOTFILES_LINK_DEV=1 "$devclone/install.sh" 2>&1); then
+      print -r -- "${g}✓${r0} ${y}live = DEV clone (${c}${branch}${r0}${y}) — in-progress edits are live, reloaded${r0}"
     else
       print -r -- "${y}dots --dev — install.sh failed on ${c}${branch}${r0}${y}:${r0}"
       print -r -- "$out"
     fi
     source ~/.zshrc
-    cd - > /dev/null
     return
   fi
 
-  local prev_branch=$(git symbolic-ref --short -q HEAD)
-  if ! git fetch -q origin main 2>/dev/null; then
+  # Default: update the main worktree (the live surface) to origin/main.
+  local before=""
+  [[ -d "$mainwt" ]] && before=$(git -C "$mainwt" rev-parse --short HEAD 2>/dev/null)
+
+  if ! git -C "$live" fetch -q origin main 2>/dev/null; then
     print -r -- "${y}dots — fetch failed (offline?), reloaded only${r0}"
-  elif ! git diff --quiet HEAD 2>/dev/null; then
-    print -r -- "${y}dots — uncommitted edits on ${c}$(git symbolic-ref --short -q HEAD)${r0}${y}; commit or stash first, reloaded only${r0}"
-  elif ! git checkout -q main 2>/dev/null; then
-    print -r -- "${y}dots — could not switch to main, reloaded only${r0}"
-  else
-    local before=$(git rev-parse --short main)
-    if git merge --ff-only origin/main >/dev/null 2>&1; then
-      local after=$(git rev-parse --short main)
-      if [[ $before == $after ]]; then
-        print -r -- "${g}✓${r0} ${y}on ${c}main${r0} ${y}at ${after} — already latest, reloaded${r0}"
-      else
-        print -r -- "${g}✓${r0} ${y}updated ${c}main${r0} ${y}${before} → ${after}, reloaded${r0}"
-      fi
-    else
-      # Fast-forward failed: don't strand the user on a stale main — return to
-      # the branch they were on before the checkout above.
-      if [[ -n $prev_branch && $prev_branch != main ]]; then
-        git checkout -q "$prev_branch" 2>/dev/null
-      fi
-      print -r -- "${y}dots — main diverged from origin/main, can't fast-forward; reloaded only${r0}"
+    source ~/.zshrc
+    return
+  fi
+
+  # Migrate (old single tree) or flip back from --dev: whenever the live surface is
+  # not already the main worktree, run install.sh to set it up + repoint the symlinks.
+  if [[ "$live" != "$mainwt" || ! -d "$mainwt" ]]; then
+    local out
+    if ! out=$(DOTFILES_NO_BREW=1 "$devclone/install.sh" 2>&1); then
+      print -r -- "${y}dots — worktree setup failed:${r0}"
+      print -r -- "$out"
+      source ~/.zshrc
+      return
     fi
+    [[ -z "$before" ]] && before=$(git -C "$mainwt" rev-parse --short HEAD 2>/dev/null)
+  fi
+
+  if ! git -C "$mainwt" diff --quiet HEAD 2>/dev/null; then
+    # The worktree should never be hand-edited (edit in the dev clone) — a dirty tree
+    # blocks the fast-forward, so flag it instead of silently doing nothing.
+    print -r -- "${y}dots — main worktree has local edits (edit in the dev clone, not the live files); reloaded only${r0}"
+  elif git -C "$mainwt" merge --ff-only origin/main >/dev/null 2>&1; then
+    local after=$(git -C "$mainwt" rev-parse --short HEAD)
+    if [[ "$before" == "$after" ]]; then
+      print -r -- "${g}✓${r0} ${y}live = ${c}main${r0} ${y}at ${after} — already latest, reloaded${r0}"
+    else
+      print -r -- "${g}✓${r0} ${y}updated live ${c}main${r0} ${y}${before} → ${after}, reloaded${r0}"
+    fi
+  else
+    print -r -- "${y}dots — main worktree can't fast-forward origin/main; reloaded only${r0}"
   fi
 
   source ~/.zshrc
-  cd - > /dev/null
 }
 
 # DEV_REPOS — single source of truth for the repos `dev` and the cd shortcuts

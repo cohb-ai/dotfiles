@@ -10,9 +10,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Personal macOS dotfiles: zsh config, utility scripts, and Claude Code config. No build system, no tests, no dependencies — just shell files and a Bash install script.
 
-## The symlink model (read this first)
+## The worktree-separation model (read this first)
 
-The files **in this repo are the source of truth**. `install.sh` creates symlinks from `$HOME` back into the repo, so the home-directory copies and the repo copies are literally the same file:
+There are **two checkouts of this repo on every machine**, and they have different jobs:
+
+| Checkout | Path | Branch | Role |
+| --- | --- | --- | --- |
+| **dev clone** | `~/code/dotfiles` | `dev/claude-1` | where you + agents develop; `DEV_REPOS[dotfiles]` / `t open dotfiles` point here |
+| **main worktree** | `~/.local/share/dotfiles-main` (override `$DOTFILES_MAIN_WT`) | `main` | the **LIVE surface** — `$HOME` symlinks point here |
+
+Both are linked worktrees of one shared `.git`. **`install.sh` creates the main worktree and points the `$HOME` symlinks at it; `dots` keeps it fast-forwarded to `origin/main`.** The dev clone stays on `dev/claude-1` for in-progress work.
+
+**Why two trees (this is the whole point):** the old single-tree model symlinked `$HOME` straight at the dev clone, so `dots` (which did `git checkout main`) swapped the live files out from under whatever branch/work was in that one shared tree — and because the tree is shared by every shell/agent, one `dots` (or a stray `git checkout main`, e.g. a concurrent agent's) reverted everyone's live config and un-applied in-progress work. Splitting them fixes it structurally: **git physically refuses to check out `main` in the dev clone while the worktree holds it**, so the live surface can only move via `dots`, and `dots` never touches the dev clone. You can develop and pull released updates in any order without collisions.
+
+**`dots` (in `.zshrc`) — two modes:**
+- **`dots`** (default) → fast-forward the main worktree to `origin/main` + reload. Live = released `main`. Never touches the dev clone, never switches a branch. On an old single-tree machine the first run **migrates in place** (moves the clone off `main` to `dev/claude-1`, creates the worktree, repoints the symlinks — aggressive by design). It resolves the live surface from the `~/.zshrc` symlink and the dev clone from the shared `--git-common-dir`, so it works wherever the repo was cloned.
+- **`dots --dev`** → flip the live symlinks to the **dev clone** (current branch) so in-progress edits are instant-live for testing; a later plain `dots` flips back to the worktree. This is the only way dev edits go live (under the new model, editing a repo file is *not* automatically live unless the symlinks point at that tree — see below).
+
+**`install.sh` link source** is chosen by `DOTFILES_LINK_DEV`: unset → `LINK_SRC` = the main worktree (default, live = released main); `DOTFILES_LINK_DEV=1` → `LINK_SRC` = the invoking dev clone (set by `dots --dev`). `setup_main_worktree()` does the migrate + worktree create/FF; it probes `$MAIN_WT/.git` to decide existence (robust to `/tmp`→`/private/tmp` path-canonicalization that defeats matching `git worktree list` output).
+
+**Migration / rollout:** because the *new* `dots`/`install.sh` only exist after the change is itself live, bootstrap each machine once by running `./install.sh` from `~/code/dotfiles` (or the old `dots`, then `./install.sh`); after that the new `dots` maintains the worktree. Adding a host still needs `install.sh` there (not just `dots`).
+
+### The symlink model (the older half, still true)
+
+The files **in the live surface are the source of truth** for what runs. `install.sh` creates symlinks from `$HOME` into that checkout, so the home-directory copies and the checkout copies are literally the same file:
 
 | Repo file | Symlinked to |
 | --- | --- |
@@ -20,7 +41,7 @@ The files **in this repo are the source of truth**. `install.sh` creates symlink
 | `bin/sleep-manager` | `~/bin/sleep-manager` |
 
 Consequences:
-- Editing either side edits both. There is no "sync" or "copy back" step.
+- Editing the **live checkout** (whichever tree the symlinks currently point at — the main worktree by default, or the dev clone after `dots --dev`) edits the `$HOME` copy too; there is no "sync" or "copy back" step. **But editing the dev clone while the symlinks point at the worktree is NOT live** — that's the deliberate separation; run `dots --dev` to make the dev clone live, or merge to `main` + `dots`.
 - `install.sh` is location-independent (it resolves its own dir via `BASH_SOURCE`), so the repo can live anywhere; re-run it after moving the repo to relink.
 - Running `install.sh` backs up any real file in the way to `<name>.bak` before linking, and `rm`s a pre-existing symlink. Adding a new managed file means adding a `link` call in `install.sh`.
 - **Deliberate exceptions to the symlink model:** `~/.zshrc.local` is a *real copy* (seeded by `install.sh` from `.zshrc.local.example`), not a symlink, so per-machine/private config (real `DEV_REPOS` paths, `TBEAM_HOST`, private completions) stays out of the repo. `.zshrc` sources it if present. Never commit a real `~/.zshrc.local`. **`~/.claude/settings.json`** is the same pattern — a real copy seeded from `claude/settings.json.example` (hook only), *always*, because Claude Code **writes** to the live file at runtime (`/model` saves the default model, "always allow" appends permission rules, plugin toggles land there); a tracked/symlinked copy kept the repo dirty and risked committing private allow-rules, so the old author-mode symlink (install choice 2 / `CLAUDE_SETTINGS=author`) was dropped — `install.sh` materializes a legacy symlink into a real copy of its current content. An existing settings file is never clobbered, and `claude/settings.json` is gitignored as defense-in-depth.
