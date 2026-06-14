@@ -25,6 +25,7 @@ link "$DOTFILES_DIR/bin/csync"            "$HOME/bin/csync"
 link "$DOTFILES_DIR/bin/pii-scan"         "$HOME/bin/pii-scan"
 link "$DOTFILES_DIR/bin/claude-stamp-tmux" "$HOME/bin/claude-stamp-tmux"
 link "$DOTFILES_DIR/bin/t"                "$HOME/bin/t"
+link "$DOTFILES_DIR/bin/pr-watch"         "$HOME/bin/pr-watch"
 link "$DOTFILES_DIR/claude/commands/tpush.md" "$HOME/.claude/commands/tpush.md"
 link "$DOTFILES_DIR/claude/commands/tpop.md"  "$HOME/.claude/commands/tpop.md"
 
@@ -145,6 +146,31 @@ fi
 # launchd agent: iCloud Drive is TCC-protected and background agents are denied,
 # whereas the shell runs in the Terminal's already-approved context. Nothing to
 # set up here — the hook fires csync at most every 15 min from your prompt.
+
+# pr-watch LaunchAgent — the autonomous PR fixer. Unlike csync, a launchd agent IS
+# right here: pr-watch only talks to gh/git/tmux, none of them TCC-protected. We
+# materialize the plist with real paths (launchctl can fail to bootstrap a symlinked
+# plist, same reasoning as ~/.claude/settings.json) but leave it INERT — poll() is a
+# no-op until `pr-watch enable` creates ~/.config/pr-watch/enabled, so a fresh clone
+# never silently arms an agent that pushes code. Only (re)load it when already opted
+# in, so re-running install.sh picks up plist changes without arming a new machine.
+install_pr_watch() {
+    local plist="$HOME/Library/LaunchAgents/$1"
+    local label="${1%.plist}"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    sed "s|__HOME__|$HOME|g" "$DOTFILES_DIR/launchd/$1" > "$plist"
+    if [[ -e "$HOME/.config/pr-watch/enabled" ]]; then
+        launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+        if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then
+            echo "Reloaded pr-watch LaunchAgent (this machine is opted in)"
+        else
+            echo "Installed $plist but could not bootstrap it — run 'pr-watch enable'"
+        fi
+    else
+        echo "Installed $plist (inert — run 'pr-watch enable' to arm the PR watcher)"
+    fi
+}
+install_pr_watch "com.chrisobrien-ai.pr-watch.plist"
 
 # Install the Homebrew tools the shell config depends on (gh, jq, tmux, fzf, glow).
 # Idempotent — brew bundle skips anything already installed. Skipped entirely if
