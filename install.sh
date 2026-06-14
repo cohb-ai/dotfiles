@@ -6,6 +6,72 @@ set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- Worktree-separation model (read the "symlink model" note in CLAUDE.md) ---
+# The LIVE surface (what $HOME symlinks point at) is a dedicated git worktree pinned
+# to `main`, NOT the clone you develop in. install.sh sets that worktree up and points
+# the symlinks at it; `dots` keeps it fast-forwarded. The clone at $DOTFILES_DIR stays
+# on the dev branch for in-progress work — and because `main` is checked out in the
+# worktree, git physically REFUSES to check it out in the dev clone, so a stray
+# `git checkout main` / old-style `dots` can never swap the live files out from under
+# in-progress work. Override the worktree location with $DOTFILES_MAIN_WT.
+#
+# Two link modes:
+#   default              LINK_SRC = the main worktree   (live = released `main`)
+#   DOTFILES_LINK_DEV=1  LINK_SRC = $DOTFILES_DIR        (live = your current dev branch;
+#                        the fast inner-loop, set by `dots --dev`)
+MAIN_WT="${DOTFILES_MAIN_WT:-$HOME/.local/share/dotfiles-main}"
+DEV_BRANCH="${DEV_BRANCH:-dev/claude-1}"
+
+# setup_main_worktree — idempotently make $MAIN_WT a worktree checked out on `main`,
+# migrating an old single-tree layout in place (aggressive, per design): if the dev
+# clone is sitting on `main`, move it to $DEV_BRANCH first so `main` is free for the
+# worktree.
+setup_main_worktree() {
+    git -C "$DOTFILES_DIR" fetch -q origin 2>/dev/null || true
+
+    local cur
+    cur="$(git -C "$DOTFILES_DIR" symbolic-ref --short -q HEAD || true)"
+    if [[ "$cur" == "main" ]]; then
+        if git -C "$DOTFILES_DIR" show-ref --verify -q "refs/heads/$DEV_BRANCH"; then
+            git -C "$DOTFILES_DIR" checkout -q "$DEV_BRANCH"
+        elif git -C "$DOTFILES_DIR" show-ref --verify -q "refs/remotes/origin/$DEV_BRANCH"; then
+            git -C "$DOTFILES_DIR" checkout -q -b "$DEV_BRANCH" "origin/$DEV_BRANCH"
+        else
+            git -C "$DOTFILES_DIR" checkout -q -b "$DEV_BRANCH"
+        fi
+        echo "Moved dev clone off main -> $DEV_BRANCH (main now lives in the worktree)"
+    fi
+
+    # Make sure a local `main` exists for the worktree to check out.
+    git -C "$DOTFILES_DIR" show-ref --verify -q refs/heads/main \
+        || git -C "$DOTFILES_DIR" branch -q --track main origin/main 2>/dev/null || true
+
+    # Ensure $MAIN_WT is a worktree. Probe its own .git (a linked worktree has a .git
+    # FILE pointing back into the repo) rather than matching `git worktree list` output,
+    # which reports canonicalized paths (/tmp -> /private/tmp) that would not compare
+    # equal and would wrongly trigger a recreate.
+    if [[ -e "$MAIN_WT/.git" ]] && git -C "$MAIN_WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        :
+    else
+        # Aggressive: clear anything squatting at the path, drop stale admin, recreate.
+        [[ -e "$MAIN_WT" ]] && rm -rf "$MAIN_WT"
+        git -C "$DOTFILES_DIR" worktree prune 2>/dev/null || true
+        mkdir -p "$(dirname "$MAIN_WT")"
+        git -C "$DOTFILES_DIR" worktree add -q "$MAIN_WT" main 2>/dev/null \
+            || git -C "$DOTFILES_DIR" worktree add -q --force "$MAIN_WT" main
+        echo "Created main worktree -> $MAIN_WT"
+    fi
+    git -C "$MAIN_WT" merge --ff-only origin/main -q 2>/dev/null || true
+}
+
+if [[ -n "${DOTFILES_LINK_DEV:-}" ]]; then
+    LINK_SRC="$DOTFILES_DIR"
+    echo "Linking from the DEV clone ($(git -C "$DOTFILES_DIR" symbolic-ref --short -q HEAD || echo '?')) — in-progress edits are live."
+else
+    setup_main_worktree
+    LINK_SRC="$MAIN_WT"
+fi
+
 link() {
     local src="$1" dst="$2"
     if [[ -L "$dst" ]]; then
@@ -19,15 +85,15 @@ link() {
     echo "Linked $dst -> $src"
 }
 
-link "$DOTFILES_DIR/.zshrc"               "$HOME/.zshrc"
-link "$DOTFILES_DIR/bin/sleep-manager"    "$HOME/bin/sleep-manager"
-link "$DOTFILES_DIR/bin/csync"            "$HOME/bin/csync"
-link "$DOTFILES_DIR/bin/pii-scan"         "$HOME/bin/pii-scan"
-link "$DOTFILES_DIR/bin/claude-stamp-tmux" "$HOME/bin/claude-stamp-tmux"
-link "$DOTFILES_DIR/bin/t"                "$HOME/bin/t"
-link "$DOTFILES_DIR/bin/pr-watch"         "$HOME/bin/pr-watch"
-link "$DOTFILES_DIR/claude/commands/tpush.md" "$HOME/.claude/commands/tpush.md"
-link "$DOTFILES_DIR/claude/commands/tpop.md"  "$HOME/.claude/commands/tpop.md"
+link "$LINK_SRC/.zshrc"               "$HOME/.zshrc"
+link "$LINK_SRC/bin/sleep-manager"    "$HOME/bin/sleep-manager"
+link "$LINK_SRC/bin/csync"            "$HOME/bin/csync"
+link "$LINK_SRC/bin/pii-scan"         "$HOME/bin/pii-scan"
+link "$LINK_SRC/bin/claude-stamp-tmux" "$HOME/bin/claude-stamp-tmux"
+link "$LINK_SRC/bin/t"                "$HOME/bin/t"
+link "$LINK_SRC/bin/pr-watch"         "$HOME/bin/pr-watch"
+link "$LINK_SRC/claude/commands/tpush.md" "$HOME/.claude/commands/tpush.md"
+link "$LINK_SRC/claude/commands/tpop.md"  "$HOME/.claude/commands/tpop.md"
 
 # SSH config via Include, NOT a wholesale symlink. Symlinking ~/.ssh/config would
 # replace any existing host entries (backed up to .bak, but still a surprise). So
@@ -38,7 +104,7 @@ link "$DOTFILES_DIR/claude/commands/tpop.md"  "$HOME/.claude/commands/tpop.md"
 # and idempotent.
 mkdir -p "$HOME/.ssh"
 chmod 700 "$HOME/.ssh"
-link "$DOTFILES_DIR/ssh/config" "$HOME/.ssh/dotfiles.conf"
+link "$LINK_SRC/ssh/config" "$HOME/.ssh/dotfiles.conf"
 ssh_main="$HOME/.ssh/config"
 include_line="Include dotfiles.conf"
 # An older install symlinked ~/.ssh/config straight at the repo; drop that link so
@@ -62,7 +128,7 @@ fi
 # a symlink) so it stays machine-specific and out of the repo. Seed it from the
 # template on first run; never clobber an existing one.
 if [[ ! -e "$HOME/.zshrc.local" ]]; then
-    cp "$DOTFILES_DIR/.zshrc.local.example" "$HOME/.zshrc.local"
+    cp "$LINK_SRC/.zshrc.local.example" "$HOME/.zshrc.local"
     echo "Created ~/.zshrc.local from template — edit it with your repos (DEV_REPOS) and TBEAM_HOST."
 fi
 
@@ -77,7 +143,7 @@ fi
 # clobber an existing real file.
 install_claude_settings() {
     local dst="$HOME/.claude/settings.json"
-    local example="$DOTFILES_DIR/claude/settings.json.example"
+    local example="$LINK_SRC/claude/settings.json.example"
 
     mkdir -p "$HOME/.claude"
 
@@ -158,7 +224,7 @@ install_pr_watch() {
     local plist="$HOME/Library/LaunchAgents/$1"
     local label="${1%.plist}"
     mkdir -p "$HOME/Library/LaunchAgents"
-    sed "s|__HOME__|$HOME|g" "$DOTFILES_DIR/launchd/$1" > "$plist"
+    sed "s|__HOME__|$HOME|g" "$LINK_SRC/launchd/$1" > "$plist"
     if [[ -e "$HOME/.config/pr-watch/enabled" ]]; then
         launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
         if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then
@@ -180,7 +246,7 @@ if [[ -n "${DOTFILES_NO_BREW:-}" ]]; then
     echo "DOTFILES_NO_BREW set — skipping Brewfile."
 elif command -v brew >/dev/null 2>&1; then
     echo "Installing Homebrew packages from Brewfile..."
-    brew bundle --file="$DOTFILES_DIR/Brewfile"
+    brew bundle --file="$LINK_SRC/Brewfile"
 else
     echo "Homebrew not found — skipping Brewfile. Install it from https://brew.sh,"
     echo "then re-run this script (or 'brew bundle') to get gh/jq/tmux/fzf/glow."

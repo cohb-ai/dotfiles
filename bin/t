@@ -294,7 +294,55 @@ def cmd_on(cfg, args):
     os.execvp("ssh", ["ssh", "-t", target, f"zsh -lic {shlex.quote(inner)}"])
 
 
-_PERL_STRIP = r"s/\r//g; s/\x07//g; s/\x1b\[[\d;]*[ABCDEFGHJKLMNSTXZfhln]//g; s/\x1b[()][012AB]//g"
+# Escape-stripping for a tmux capture-pane log of a TUI (Claude Code). The naive
+# "delete \r, strip a hand-picked set of CSI letters" stripper (the old _PERL_STRIP)
+# was garbage on real logs two ways: (1) deleting \r collapsed every screen REPAINT
+# into one giant jammed line, and (2) its letter allowlist missed the private-mode
+# CSI sequences a modern TUI emits — \x1b[>4;2m / \x1b[>1u / \x1b[<u (keyboard
+# protocol) and \x1b[?25h/l (cursor show/hide) — whose `>`/`<`/`?` parameter marker
+# defeated the [\d;]* match, so they leaked into less as `^Qu1u4;2m`-style junk.
+# _clean_capture handles the FULL CSI grammar instead: ESC [ <params 0x30-0x3F>
+# <intermediates 0x20-0x2F> <final 0x40-0x7E>. It drops every CSI EXCEPT plain SGR
+# colour (final `m`, digit/semicolon params only) so `less -R` still renders colour,
+# strips OSC title sets / charset selects / lone control chars, and splits on BOTH
+# \r and \n so each repaint row becomes one display line. Shared by the less and the
+# --dump paths so they render identically. (Residual word-jamming — "monthpriceforecast"
+# — is the TUI positioning words with cursor moves we strip; reconstructing that needs a
+# terminal emulator and is out of scope.)
+# All stripping runs on raw BYTES, before the utf-8 decode. A tmux capture interleaves
+# SO/SI charset-shift bytes (\x0e/\x0f) and escapes *inside* multibyte UTF-8 chars
+# (⏵, ─, ←), so decoding first and stripping after leaves the char already mangled into
+# �; stripping the control/escape bytes first makes each char's bytes contiguous so
+# it decodes cleanly.
+_OSC = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_CSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
+_CHARSET = re.compile(rb"\x1b[()][0-9AB]")
+_ESC2 = re.compile(rb"\x1b[=>Mc78]")
+_CTRL = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]")
+
+
+def _keep_sgr(m):
+    """CSI replacement: keep plain SGR colour (\\x1b[…m, digit/semicolon params), drop
+    everything else (cursor moves, clears, private-mode toggles)."""
+    s = m.group(0)
+    if s[-1:] == b"m" and all(c in b"0123456789;" for c in s[2:-1]):
+        return s
+    return b""
+
+
+def _clean_capture(logfile):
+    """Read a capture-pane log, strip non-colour escapes, return one display line per
+    repaint row (split on \\r and \\n)."""
+    b = open(logfile, "rb").read()
+    b = _OSC.sub(b"", b)
+    b = _CSI.sub(_keep_sgr, b)
+    b = _CHARSET.sub(b"", b)
+    b = _ESC2.sub(b"", b)
+    # Drop the leftover C0 control chars (BEL, the SO/SI charset shifts \x0e/\x0f that
+    # show as ^N/^O, etc.) — but keep \t, \n, \r (the split feeds on \r/\n) and \x1b
+    # (the surviving SGR colour sequences start with it).
+    b = _CTRL.sub(b"", b)
+    return re.split(r"[\r\n]+", b.decode("utf-8", "replace"))
 
 
 def _infer_repo(cfg, slot=None):
@@ -386,25 +434,20 @@ def cmd_read(cfg, args):
         print(f"No log found: {logfile}")
         print(f"(start a session with 't open {args.repo} {slot}' first)")
         return 1
+    lines = _clean_capture(logfile)
     if dump:
         # Print straight to stdout (no pager) so a mobile terminal's native touch-scroll
         # can scroll it — `less` repaints one viewport and needs arrow/PageUp keys that
-        # are unusable on a phone. A tmux capture of a TUI separates screen REPAINTS with
-        # bare \r (overwrite column 0), emitting a real \n only rarely, so we must NOT
-        # strip \r here (as _PERL_STRIP does for less): split on BOTH \r and \n so each
-        # repaint row is one display line, then --tail N keeps the last N of them (bare
-        # --dump prints all). Cursor-move/charset escapes go; SGR colour stays.
-        raw = open(logfile, "rb").read().decode("utf-8", "replace")
-        cleaned = re.sub(r"\x07|\x1b\[[\d;]*[ABCDEFGHJKLMNSTXZfhln]|\x1b[()][012AB]", "", raw)
-        lines = re.split(r"[\r\n]+", cleaned)
+        # are unusable on a phone. --tail N keeps only the last N lines (bare --dump
+        # prints all). SGR colour stays so the dump is still readable; the rest is
+        # stripped by _clean_capture.
         if args.tail is not None:
             lines = lines[-args.tail:]
         sys.stdout.write("\n".join(lines) + "\n")
         return 0
-    perl = subprocess.Popen(["perl", "-pe", _PERL_STRIP, logfile], stdout=subprocess.PIPE)
-    less = subprocess.Popen(["less", "-R", "+G"], stdin=perl.stdout)
-    perl.stdout.close()
-    less.wait()
+    # Feed the same cleaned, repaint-split text to less -R (colour rendered, +G = tail).
+    less = subprocess.Popen(["less", "-R", "+G"], stdin=subprocess.PIPE)
+    less.communicate(("\n".join(lines) + "\n").encode("utf-8", "replace"))
     return 0
 
 

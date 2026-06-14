@@ -136,76 +136,92 @@ prview() {
 # exit/Ctrl-C. For a backgrounded, persistent block use `sleep-manager` instead.
 nosleep() { [[ "$1" == -h || "$1" == --help ]] && { _help_for nosleep; return 0; }; trap 'sudo pmset -a disablesleep 0' EXIT INT; sudo pmset -a disablesleep 1 && caffeinate -dimsu; }
 
-# dots — sync your dotfiles to origin/main HEAD and reload zsh
+# dots — update your LIVE dotfiles to origin/main and reload zsh
 #
 # Usage: dots [--dev]
 #
-# Default: fetches origin/main, switches to the main branch, fast-forwards it to
-# origin/main HEAD, and re-sources ~/.zshrc — so your live dotfiles become exactly
-# what is published on main, with nothing done locally (no merge, no commit). main
-# is protected (you never commit to it directly), so the fast-forward always
-# applies. Leaves you on main; develop on the dev branch via `t open dotfiles`.
-# Safe: stops and only reloads if the working tree has uncommitted edits, so it
-# never discards work — commit or stash first.
+# The live surface (what $HOME symlinks point at) is a dedicated git worktree pinned
+# to `main`, separate from the clone you develop in (see the symlink-model note in
+# CLAUDE.md). Default `dots` fast-forwards THAT worktree to origin/main and re-sources
+# ~/.zshrc — so your live config becomes exactly what is published on main. It never
+# touches your dev clone, never switches your branch, and so can NOT blast away
+# in-progress work: develop on the dev branch via `t open dotfiles`, run `dots` to
+# pull released updates whenever, in any order. (First run on an old single-tree
+# machine migrates it: moves the clone off main and sets the worktree up.)
 #
-# --dev (-d): install from whatever branch is checked out NOW instead — re-runs
-# install.sh (relinks any new/renamed files) and reloads, without fetching or
-# switching branches. Use it to apply in-progress dev work (e.g. a new bin script
-# that needs a fresh symlink) before it lands on main. Skips brew bundle.
+# --dev (-d): flip the live surface to your DEV clone (current branch) instead —
+# re-links from it (catching new/renamed files) and reloads, so in-progress edits go
+# live for testing without merging. A later plain `dots` flips live back to the main
+# worktree. Skips brew bundle.
 dots() {
   [[ "$1" == -h || "$1" == --help ]] && { _help_for dots; return 0; }
-  # Resolve the repo from the ~/.zshrc symlink (:A follows it to the real path,
-  # :h takes its dir) so this works wherever the repo was cloned — install.sh is
-  # location-independent, so don't hardcode ~/code/dotfiles.
-  local dotdir="${${:-$HOME/.zshrc}:A:h}"
-  cd "$dotdir" || return
 
-  local g c y b r0=
-  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; b=$'\e[1m'; r0=$'\e[0m'; fi
+  local g c y r0=
+  if [[ -t 1 ]]; then g=$'\e[32m'; c=$'\e[36m'; y=$'\e[2m'; r0=$'\e[0m'; fi
+
+  # The live surface — resolve the ~/.zshrc symlink to its real dir (:A follows the
+  # link + absolutizes, :h takes the dirname). After migration this IS the main
+  # worktree; on an un-migrated machine it is still the single clone.
+  local live="${${:-$HOME/.zshrc}:A:h}"
+  # The dev clone = parent of the shared .git common dir (works from any worktree).
+  local commondir=$(git -C "$live" rev-parse --git-common-dir 2>/dev/null)
+  [[ $commondir == /* ]] || commondir="$live/$commondir"
+  local devclone="${commondir:A:h}"
+  local mainwt="${DOTFILES_MAIN_WT:-$HOME/.local/share/dotfiles-main}"
 
   if [[ "$1" == --dev || "$1" == -d ]]; then
-    # Install from the current branch: relink (catches new files), no git, no brew.
-    local branch=$(git symbolic-ref --short -q HEAD)
+    # Point the live symlinks at the dev clone (current branch); relink, no brew.
+    local branch=$(git -C "$devclone" symbolic-ref --short -q HEAD)
     local out
-    if out=$(DOTFILES_NO_BREW=1 ./install.sh 2>&1); then
-      print -r -- "${g}✓${r0} ${y}installed from ${c}${branch}${r0} ${y}(current branch) — reloaded${r0}"
+    if out=$(DOTFILES_NO_BREW=1 DOTFILES_LINK_DEV=1 "$devclone/install.sh" 2>&1); then
+      print -r -- "${g}✓${r0} ${y}live = DEV clone (${c}${branch}${r0}${y}) — in-progress edits are live, reloaded${r0}"
     else
       print -r -- "${y}dots --dev — install.sh failed on ${c}${branch}${r0}${y}:${r0}"
       print -r -- "$out"
     fi
     source ~/.zshrc
-    cd - > /dev/null
     return
   fi
 
-  local prev_branch=$(git symbolic-ref --short -q HEAD)
-  if ! git fetch -q origin main 2>/dev/null; then
+  # Default: update the main worktree (the live surface) to origin/main.
+  local before=""
+  [[ -d "$mainwt" ]] && before=$(git -C "$mainwt" rev-parse --short HEAD 2>/dev/null)
+
+  if ! git -C "$live" fetch -q origin main 2>/dev/null; then
     print -r -- "${y}dots — fetch failed (offline?), reloaded only${r0}"
-  elif ! git diff --quiet HEAD 2>/dev/null; then
-    print -r -- "${y}dots — uncommitted edits on ${c}$(git symbolic-ref --short -q HEAD)${r0}${y}; commit or stash first, reloaded only${r0}"
-  elif ! git checkout -q main 2>/dev/null; then
-    print -r -- "${y}dots — could not switch to main, reloaded only${r0}"
-  else
-    local before=$(git rev-parse --short main)
-    if git merge --ff-only origin/main >/dev/null 2>&1; then
-      local after=$(git rev-parse --short main)
-      if [[ $before == $after ]]; then
-        print -r -- "${g}✓${r0} ${y}on ${c}main${r0} ${y}at ${after} — already latest, reloaded${r0}"
-      else
-        print -r -- "${g}✓${r0} ${y}updated ${c}main${r0} ${y}${before} → ${after}, reloaded${r0}"
-      fi
-    else
-      # Fast-forward failed: don't strand the user on a stale main — return to
-      # the branch they were on before the checkout above.
-      if [[ -n $prev_branch && $prev_branch != main ]]; then
-        git checkout -q "$prev_branch" 2>/dev/null
-      fi
-      print -r -- "${y}dots — main diverged from origin/main, can't fast-forward; reloaded only${r0}"
+    source ~/.zshrc
+    return
+  fi
+
+  # Migrate (old single tree) or flip back from --dev: whenever the live surface is
+  # not already the main worktree, run install.sh to set it up + repoint the symlinks.
+  if [[ "$live" != "$mainwt" || ! -d "$mainwt" ]]; then
+    local out
+    if ! out=$(DOTFILES_NO_BREW=1 "$devclone/install.sh" 2>&1); then
+      print -r -- "${y}dots — worktree setup failed:${r0}"
+      print -r -- "$out"
+      source ~/.zshrc
+      return
     fi
+    [[ -z "$before" ]] && before=$(git -C "$mainwt" rev-parse --short HEAD 2>/dev/null)
+  fi
+
+  if ! git -C "$mainwt" diff --quiet HEAD 2>/dev/null; then
+    # The worktree should never be hand-edited (edit in the dev clone) — a dirty tree
+    # blocks the fast-forward, so flag it instead of silently doing nothing.
+    print -r -- "${y}dots — main worktree has local edits (edit in the dev clone, not the live files); reloaded only${r0}"
+  elif git -C "$mainwt" merge --ff-only origin/main >/dev/null 2>&1; then
+    local after=$(git -C "$mainwt" rev-parse --short HEAD)
+    if [[ "$before" == "$after" ]]; then
+      print -r -- "${g}✓${r0} ${y}live = ${c}main${r0} ${y}at ${after} — already latest, reloaded${r0}"
+    else
+      print -r -- "${g}✓${r0} ${y}updated live ${c}main${r0} ${y}${before} → ${after}, reloaded${r0}"
+    fi
+  else
+    print -r -- "${y}dots — main worktree can't fast-forward origin/main; reloaded only${r0}"
   fi
 
   source ~/.zshrc
-  cd - > /dev/null
 }
 
 # DEV_REPOS — single source of truth for the repos `dev` and the cd shortcuts
@@ -649,22 +665,54 @@ _dev_summary_for_pid() {
   _transcript_title "${tx[1]}"
 }
 
+# _dev_session_sid <session> [dir] — the AUTHORITATIVE Claude session id for a dev
+# slot, used both to render its summary and as the targeting id in _dev_session_rows.
+#
+# The tmux CLAUDE_RESUME_ID stamp alone is NOT trustworthy: it is a tmux *session*
+# variable that outlives the claude that set it, so a slot whose pane is reused by a
+# different conversation keeps the *predecessor's* id — even a cross-repo one (the
+# "dot-3 shows an amex/financial-forecast title" bug). So resolve in order:
+#   1. The SessionStart registry entry for the claude ACTUALLY running in the pane
+#      (pid -> "sid\tcwd", written by claude-stamp-tmux). This is ground truth for
+#      the live process and BEATS the stamp when they disagree. Guarded by a
+#      cwd == dir check so a recycled pid's stale entry is ignored.
+#   2. The tmux stamp — but only if its transcript lives in THIS slot's own project
+#      dir; a stamp pointing at another repo's transcript is stale and is dropped.
+# Prints the id, or nothing (caller then falls back to a birthtime match).
+_dev_session_sid() {
+  setopt local_options null_glob bare_glob_qual
+  local session="$1" dir="${2:-}" sid cpid reg line rcwd
+  [[ -n $dir ]] || dir=$(tmux display-message -p -t "$session" '#{session_path}' 2>/dev/null)
+  cpid=$(_dev_session_claude_pid "$session")
+  reg="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sessions/$cpid"
+  if [[ -n $cpid && -r $reg ]]; then
+    line="$(<"$reg")"; sid="${line%%$'\t'*}"; rcwd="${line#*$'\t'}"
+    [[ -n $sid && $rcwd == $dir ]] && { print -r -- "$sid"; return 0; }
+    sid=
+  fi
+  sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
+  [[ -n $sid ]] || return 0
+  local -a tx=( "$HOME/.claude/projects/${dir//\//-}/$sid".jsonl(N) )
+  [[ -n ${tx[1]} ]] && print -r -- "$sid"
+  return 0
+}
+
 # _dev_session_summary <session> <dir> — one-line "what it's working on" for a dev
-# session: the title of its Claude transcript, resolved by the id stashed on the
-# session (CLAUDE_RESUME_ID, set by _dev_new_session / _dev_resume_session / the
-# claude-stamp-tmux SessionStart hook). For OLD (pre-hook) sessions with no stashed
-# id it defers to _dev_summary_for_pid (birthtime match). Prints nothing if none.
+# session: the title of its Claude transcript, resolved by the AUTHORITATIVE id
+# (_dev_session_sid — registry-first, stamp validated against the slot's repo). When
+# that yields nothing (truly pre-hook session, or only a stale cross-repo stamp) it
+# defers to _dev_summary_for_pid (birthtime match on the LIVE claude). None → "".
 _dev_session_summary() {
   setopt local_options null_glob bare_glob_qual
   local session="$1" dir="$2" sid
-  sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
+  sid=$(_dev_session_sid "$session" "$dir")
   if [[ -n $sid ]]; then
-    local -a tx=( "$HOME/.claude/projects"/*/"$sid".jsonl(N) )
-    [[ -n ${tx[1]} ]] || return 0
-    _transcript_title "${tx[1]}"
-  else
-    _dev_summary_for_pid "$dir" "$(_dev_session_claude_pid "$session")"
+    # A valid id (registry or validated stamp) always has its transcript under this
+    # slot's own project dir, since the dir IS the conversation's cwd.
+    local -a tx=( "$HOME/.claude/projects/${dir//\//-}/$sid".jsonl(N) )
+    [[ -n ${tx[1]} ]] && { _transcript_title "${tx[1]}"; return 0; }
   fi
+  _dev_summary_for_pid "$dir" "$(_dev_session_claude_pid "$session")"
 }
 
 # _dev_fg_rows — emit FOREGROUND claude sessions (ones you ran directly in a terminal,
@@ -981,7 +1029,10 @@ _dev_session_rows() {
     [[ -n $s ]] || continue
     short="${s#dev-}"
     dir=$(tmux display-message -p -t "$s" '#{session_path}' 2>/dev/null)
-    sid=$(tmux show-environment -t "$s" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
+    # Authoritative id (registry-first, stamp validated against the slot's repo) —
+    # not the raw CLAUDE_RESUME_ID stamp, which a reused slot can carry stale from a
+    # prior (even cross-repo) occupant; this is the targeting id callers act on.
+    sid=$(_dev_session_sid "$s" "$dir")
     # `-` sentinel for an unstamped slot (idle / no conversation): keeps every
     # field non-empty so a tab is never a *leading/consecutive* IFS-whitespace
     # delimiter that `read` would collapse, sliding the columns.
@@ -2731,21 +2782,29 @@ PY
 }
 
 # _tbeam_kill_owner — stop the dev-<repo>-<slot> tmux session on THIS machine that
-# owns the session id in $TB_SID (matched on the CLAUDE_RESUME_ID stamp), if one
-# is live. This is what turns tbeam from a copy into a MOVE: once a session has
-# landed on the far side, its origin-side owner is killed so exactly one live
-# claude owns the id — two live owners of one transcript have no lock and diverge
-# (the same invariant tpush/tpop protect). Shared dotfiles code so the caller can
-# run it on the *remote* origin over ssh; the id rides in $TB_SID (env, not args)
-# to dodge nested ssh-quoting, exactly like _tbeam_land. kill-session only SIGHUPs
-# claude, but the transcript is appended live and already synced, so nothing is
-# lost. Echoes the killed session name as its last line (caller reports it);
-# silent, returns nonzero, if the id isn't live in any local dev slot.
+# owns the session id in $TB_SID, if one is live. This is what turns tbeam from a
+# copy into a MOVE: once a session has landed on the far side, its origin-side
+# owner is killed so exactly one live claude owns the id — two live owners of one
+# transcript have no lock and diverge (the same invariant tpush/tpop protect).
+# Shared dotfiles code so the caller can run it on the *remote* origin over ssh;
+# the id rides in $TB_SID (env, not args) to dodge nested ssh-quoting, exactly
+# like _tbeam_land. kill-session only SIGHUPs claude, but the transcript is
+# appended live and already synced, so nothing is lost. Echoes the killed session
+# name as its last line (caller reports it); silent, returns nonzero, if the id
+# isn't live in any local dev slot.
+#
+# Slot id resolution must match _dev_session_rows: use _dev_session_sid (registry-
+# first, with the stamp validated against the slot's repo) rather than the raw
+# CLAUDE_RESUME_ID stamp. Otherwise a stale stamp (e.g. cross-repo pane reuse) on
+# the still-live origin slot would cause this to silently fail to find the owner
+# while _dev_pull, which already resolved the authoritative id via _dev_session_rows,
+# resumes locally — leaving two live owners on the same transcript.
 _tbeam_kill_owner() {
-  local sid="$TB_SID" s
+  local sid="$TB_SID" s slot_sid
   [[ -n $sid ]] || return 1
   for s in ${(f)"$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^dev-')"}; do
-    if [[ "$(tmux show-environment -t "$s" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)" == "$sid" ]]; then
+    slot_sid=$(_dev_session_sid "$s")
+    if [[ "$slot_sid" == "$sid" ]]; then
       tmux kill-session -t "$s" 2>/dev/null && { print -r -- "$s"; return 0; }
     fi
   done
