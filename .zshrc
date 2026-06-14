@@ -649,22 +649,54 @@ _dev_summary_for_pid() {
   _transcript_title "${tx[1]}"
 }
 
+# _dev_session_sid <session> [dir] — the AUTHORITATIVE Claude session id for a dev
+# slot, used both to render its summary and as the targeting id in _dev_session_rows.
+#
+# The tmux CLAUDE_RESUME_ID stamp alone is NOT trustworthy: it is a tmux *session*
+# variable that outlives the claude that set it, so a slot whose pane is reused by a
+# different conversation keeps the *predecessor's* id — even a cross-repo one (the
+# "dot-3 shows an amex/financial-forecast title" bug). So resolve in order:
+#   1. The SessionStart registry entry for the claude ACTUALLY running in the pane
+#      (pid -> "sid\tcwd", written by claude-stamp-tmux). This is ground truth for
+#      the live process and BEATS the stamp when they disagree. Guarded by a
+#      cwd == dir check so a recycled pid's stale entry is ignored.
+#   2. The tmux stamp — but only if its transcript lives in THIS slot's own project
+#      dir; a stamp pointing at another repo's transcript is stale and is dropped.
+# Prints the id, or nothing (caller then falls back to a birthtime match).
+_dev_session_sid() {
+  setopt local_options null_glob bare_glob_qual
+  local session="$1" dir="${2:-}" sid cpid reg line rcwd
+  [[ -n $dir ]] || dir=$(tmux display-message -p -t "$session" '#{session_path}' 2>/dev/null)
+  cpid=$(_dev_session_claude_pid "$session")
+  reg="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sessions/$cpid"
+  if [[ -n $cpid && -r $reg ]]; then
+    line="$(<"$reg")"; sid="${line%%$'\t'*}"; rcwd="${line#*$'\t'}"
+    [[ -n $sid && $rcwd == $dir ]] && { print -r -- "$sid"; return 0; }
+    sid=
+  fi
+  sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
+  [[ -n $sid ]] || return 0
+  local -a tx=( "$HOME/.claude/projects/${dir//\//-}/$sid".jsonl(N) )
+  [[ -n ${tx[1]} ]] && print -r -- "$sid"
+  return 0
+}
+
 # _dev_session_summary <session> <dir> — one-line "what it's working on" for a dev
-# session: the title of its Claude transcript, resolved by the id stashed on the
-# session (CLAUDE_RESUME_ID, set by _dev_new_session / _dev_resume_session / the
-# claude-stamp-tmux SessionStart hook). For OLD (pre-hook) sessions with no stashed
-# id it defers to _dev_summary_for_pid (birthtime match). Prints nothing if none.
+# session: the title of its Claude transcript, resolved by the AUTHORITATIVE id
+# (_dev_session_sid — registry-first, stamp validated against the slot's repo). When
+# that yields nothing (truly pre-hook session, or only a stale cross-repo stamp) it
+# defers to _dev_summary_for_pid (birthtime match on the LIVE claude). None → "".
 _dev_session_summary() {
   setopt local_options null_glob bare_glob_qual
   local session="$1" dir="$2" sid
-  sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
+  sid=$(_dev_session_sid "$session" "$dir")
   if [[ -n $sid ]]; then
-    local -a tx=( "$HOME/.claude/projects"/*/"$sid".jsonl(N) )
-    [[ -n ${tx[1]} ]] || return 0
-    _transcript_title "${tx[1]}"
-  else
-    _dev_summary_for_pid "$dir" "$(_dev_session_claude_pid "$session")"
+    # A valid id (registry or validated stamp) always has its transcript under this
+    # slot's own project dir, since the dir IS the conversation's cwd.
+    local -a tx=( "$HOME/.claude/projects/${dir//\//-}/$sid".jsonl(N) )
+    [[ -n ${tx[1]} ]] && { _transcript_title "${tx[1]}"; return 0; }
   fi
+  _dev_summary_for_pid "$dir" "$(_dev_session_claude_pid "$session")"
 }
 
 # _dev_fg_rows — emit FOREGROUND claude sessions (ones you ran directly in a terminal,
@@ -981,7 +1013,10 @@ _dev_session_rows() {
     [[ -n $s ]] || continue
     short="${s#dev-}"
     dir=$(tmux display-message -p -t "$s" '#{session_path}' 2>/dev/null)
-    sid=$(tmux show-environment -t "$s" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
+    # Authoritative id (registry-first, stamp validated against the slot's repo) —
+    # not the raw CLAUDE_RESUME_ID stamp, which a reused slot can carry stale from a
+    # prior (even cross-repo) occupant; this is the targeting id callers act on.
+    sid=$(_dev_session_sid "$s" "$dir")
     # `-` sentinel for an unstamped slot (idle / no conversation): keeps every
     # field non-empty so a tab is never a *leading/consecutive* IFS-whitespace
     # delimiter that `read` would collapse, sliding the columns.
