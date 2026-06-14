@@ -1624,6 +1624,22 @@ _dev_remote_resolve() {
 # leaks into the title it reads `zsh -lic 't open ff 1'`, not the ugly `t\ open\ ff\ 1`.
 _term_title() { [[ -t 1 ]] && printf '\e]0;%s\a' "$1" }
 
+# _term_reset_mouse — disable every terminal mouse-tracking + bracketed-paste mode.
+# WHY: a remote attach (`t open`/`t beam`/`on`, all `ssh -t … zsh -lic`) runs a TUI
+# (tmux/claude) that turns mouse reporting ON. When that session dies UNCLEANLY — broken
+# pipe / "Connection reset by peer" on a sleeping/dropped host — the remote tmux never
+# sends its mouse-mode reset back, so the LOCAL Terminal is left in mouse-reporting mode:
+# the scroll wheel then emits SGR mouse events that print as literal `35;..M` garbage and
+# scrollback is dead until you `reset`. Registered as a precmd hook below so EVERY return
+# to the prompt clears it — this is the only catch-all that also covers `on`, which
+# `os.execvp`s into ssh in bin/t and so cannot clean up in-process (same reason its tab
+# title is refreshed by precmd, not cleared in bin/t). At the zsh prompt mouse mode is
+# always meant to be off (TUIs that want it enable+disable it themselves), so an
+# unconditional reset here is safe; the sequences are invisible (no cursor move/output).
+# Modes: 1000 press · 1002 drag · 1003 any-motion (the spammer) · 1005/1006/1015 encodings · 2004 bracketed paste.
+_term_reset_mouse() { [[ -t 1 ]] && printf '\e[?1000l\e[?1002l\e[?1003l\e[?1005l\e[?1006l\e[?1015l\e[?2004l' }
+add-zsh-hook precmd _term_reset_mouse
+
 # _dev_local_slot_live <repo> <slot> — true if a dev-<repo>-<slot> tmux session is
 # live on THIS machine (any dev-<repo>-* when <slot> is empty). Cheap (tmux only, no
 # ssh): the gate that lets `t open` prefer a local slot before paying for a remote
