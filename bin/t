@@ -533,6 +533,7 @@ Run `t <verb> -h` for a verb's own flags.""")
     sp.add_argument("slot", nargs="?", help="slot number, 'fg' (adopt a :fg session), or a session id")
     sp.add_argument("--new", action="store_true", help="force a fresh session")
     sp.add_argument("--fg", action="store_true", help="no tmux: foreground-resume / run inline")
+    sp.add_argument("-l", "--local", "--here", dest="local", action="store_true", help="force this machine: skip the remote auto-attach probe (combine with --fg for local foreground)")
     sp.add_argument("-r", "--remote", action="store_true", help="remote: attach a live slot on any host; with --new, start one on the default host")
     sp.add_argument("--host", help="which host to open/attach on (sets the host for -r; default for --new: first $REMOTE_HOSTS)")
 

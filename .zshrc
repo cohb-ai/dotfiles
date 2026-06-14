@@ -1296,13 +1296,16 @@ _dev_new_session() {
 #                between machines — that is `tbeam` (send) / `tbeam --from` (receive).
 #   -r, --remote  FORCE the remote branch even when a local slot exists; with `ls`
 #                 list every host; with `kill` kill it there; bare `t open -r` picks
+#   -l, --local   FORCE this machine: skip the remote auto-attach probe, so a slot
+#                 live only on another host is left there and a fresh LOCAL slot is
+#                 opened instead (alias: --here; --here --fg = local foreground)
 #
 # repo is a key of DEV_REPOS (configured in ~/.zshrc.local). The checked-out branch
 # is per-repo (DEV_BRANCHES[repo], else $DEV_BRANCH). dev kill matches session names,
 # so it also reaches orphaned sessions whose repo alias is gone (dev kill dotfiles 1).
 # Surveying what's live everywhere is `dev ls -r`; sending a session away is `tbeam`.
 _t_dev() {
-  local no_tmux= force= remote= all=
+  local no_tmux= force= remote= all= local_only=
   local -a pos
   local arg
   # -f/--fg = foreground/no-tmux EVERYWHERE (matches tbeam -f). The kill-confirm
@@ -1315,6 +1318,7 @@ _t_dev() {
       -f|--fg|--no-tmux) no_tmux=1 ;;
       -y|--yes|--force)  force=1 ;;
       -r|--remote)       remote=1 ;;
+      -l|--local|--here) local_only=1 ;;
       -a|--all)          all=1 ;;
       *)                 pos+=("$arg") ;;
     esac
@@ -1352,6 +1356,12 @@ _t_dev() {
   # the all-remote picker. The AUTO half runs further down, once <repo> is resolved from
   # the cwd, so even a bare `t open` in a repo dir can find a slot that is live only on
   # another host. To pull a remote session HERE (a move), use `t beam … --from <host>`.
+  # -l/--local/--here and -r/--remote are opposite intents (force local vs. force
+  # remote), so reject the combination rather than silently letting -r win.
+  if [[ -n $remote && -n $local_only ]]; then
+    echo "t open: --local/--here and -r/--remote are mutually exclusive" >&2
+    return 2
+  fi
   if [[ -n $remote ]]; then
     _dev_remote "$repo" "$slot" "$no_tmux"     # explicit -r: force attach in place on its host
     return
@@ -1397,6 +1407,7 @@ _t_dev() {
       print -r -- "  t open <repo> [slot]        open/reattach (slot 1-4, --new to force fresh)"
       print -r -- "  t open <id> | <repo> fg     adopt a foreground (:fg) session here (id from t ls)"
       print -r -- "  t open <repo> [slot] --fg   no tmux: foreground-resume / run inline"
+      print -r -- "  t open <repo> [slot] --here force this machine (skip remote probe); --here --fg = local foreground"
       print -r -- "  t open <repo> [slot]        auto-attaches on another host if the slot is live there"
       print -r -- "  t open <repo> [slot] -r --new        start a fresh session on the default remote host"
       print -r -- "  t open <repo> [slot] --host <host>   start/attach on a specific host"
@@ -1459,7 +1470,10 @@ _t_dev() {
   # always wins (cheap tmux check, no ssh). Skipped with no hosts, for -f/`new` (a
   # foreground/fresh request stays local), and when a local slot is already live; if
   # nothing is live remotely either, fall through to the local fresh-start path.
-  if (( ${#REMOTE_HOSTS} )) && [[ -z $no_tmux && $slot != new ]] && ! _dev_local_slot_live "$repo" "$slot"; then
+  # -l/--local/--here forces this machine: skip the probe entirely so a slot that
+  # is live only on another host is NOT attached — a fresh local slot is opened
+  # instead (combine with --fg for a local foreground resume / inline claude).
+  if (( ${#REMOTE_HOSTS} )) && [[ -z $no_tmux && -z $local_only && $slot != new ]] && ! _dev_local_slot_live "$repo" "$slot"; then
     local res; res=$(_dev_remote_resolve "$repo" "$slot" 2>/dev/null)   # quiet probe
     if [[ -n $res ]]; then
       echo "(not live here — attaching on ${res%%$'\t'*}; Ctrl-b d to detach)"
@@ -1623,6 +1637,22 @@ _dev_remote_resolve() {
 # ${(qq)rcmd}` uses (qq) (single-quote), NOT (q) (backslash) — so even when the argv
 # leaks into the title it reads `zsh -lic 't open ff 1'`, not the ugly `t\ open\ ff\ 1`.
 _term_title() { [[ -t 1 ]] && printf '\e]0;%s\a' "$1" }
+
+# _term_reset_mouse — disable every terminal mouse-tracking + bracketed-paste mode.
+# WHY: a remote attach (`t open`/`t beam`/`on`, all `ssh -t … zsh -lic`) runs a TUI
+# (tmux/claude) that turns mouse reporting ON. When that session dies UNCLEANLY — broken
+# pipe / "Connection reset by peer" on a sleeping/dropped host — the remote tmux never
+# sends its mouse-mode reset back, so the LOCAL Terminal is left in mouse-reporting mode:
+# the scroll wheel then emits SGR mouse events that print as literal `35;..M` garbage and
+# scrollback is dead until you `reset`. Registered as a precmd hook below so EVERY return
+# to the prompt clears it — this is the only catch-all that also covers `on`, which
+# `os.execvp`s into ssh in bin/t and so cannot clean up in-process (same reason its tab
+# title is refreshed by precmd, not cleared in bin/t). At the zsh prompt mouse mode is
+# always meant to be off (TUIs that want it enable+disable it themselves), so an
+# unconditional reset here is safe; the sequences are invisible (no cursor move/output).
+# Modes: 1000 press · 1002 drag · 1003 any-motion (the spammer) · 1005/1006/1015 encodings · 2004 bracketed paste.
+_term_reset_mouse() { [[ -t 1 ]] && printf '\e[?1000l\e[?1002l\e[?1003l\e[?1005l\e[?1006l\e[?1015l\e[?2004l' }
+add-zsh-hook precmd _term_reset_mouse
 
 # _dev_local_slot_live <repo> <slot> — true if a dev-<repo>-<slot> tmux session is
 # live on THIS machine (any dev-<repo>-* when <slot> is empty). Cheap (tmux only, no
@@ -3063,10 +3093,11 @@ _t_open() {
     esac
     rest+=("$arg")
     case "$arg" in
-      --new|new)   a+=(new); isnew=1 ;;
-      --fg)        a+=(-f) ;;
-      -r|--remote) remote=1; a+=(-r) ;;
-      *)           a+=("$arg") ;;
+      --new|new)         a+=(new); isnew=1 ;;
+      --fg)              a+=(-f) ;;
+      -r|--remote)       remote=1; a+=(-r) ;;
+      -l|--local|--here) a+=(--local) ;;
+      *)                 a+=("$arg") ;;
     esac
   done
   [[ -n $want_host ]] && { echo "t open: --host requires a value" >&2; return 2; }
@@ -3092,6 +3123,7 @@ _t_open() {
     for arg in "${rest[@]}"; do
       case "$arg" in
         -r|--remote) ;;
+        -l|--local|--here) ;;   # --host already names the machine; "force local" is moot
         --*) flags+=("$arg") ;;
         *)   pos+=("$arg") ;;
       esac
