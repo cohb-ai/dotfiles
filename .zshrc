@@ -195,7 +195,9 @@ dots() {
 
   # Migrate (old single tree) or flip back from --dev: whenever the live surface is
   # not already the main worktree, run install.sh to set it up + repoint the symlinks.
-  if [[ "$live" != "$mainwt" || ! -d "$mainwt" ]]; then
+  # Canonicalize $mainwt with :A so a /tmp vs /private/tmp (or any symlinked parent)
+  # difference does not re-trigger migration on every dots run — $live is already :A.
+  if [[ "$live" != "${mainwt:A}" || ! -d "$mainwt" ]]; then
     local out
     if ! out=$(DOTFILES_NO_BREW=1 "$devclone/install.sh" 2>&1); then
       print -r -- "${y}dots — worktree setup failed:${r0}"
