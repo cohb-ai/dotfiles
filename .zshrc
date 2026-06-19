@@ -195,7 +195,9 @@ dots() {
 
   # Migrate (old single tree) or flip back from --dev: whenever the live surface is
   # not already the main worktree, run install.sh to set it up + repoint the symlinks.
-  if [[ "$live" != "$mainwt" || ! -d "$mainwt" ]]; then
+  # Canonicalize $mainwt with :A so a /tmp vs /private/tmp (or any symlinked parent)
+  # difference does not re-trigger migration on every dots run — $live is already :A.
+  if [[ "$live" != "${mainwt:A}" || ! -d "$mainwt" ]]; then
     local out
     if ! out=$(DOTFILES_NO_BREW=1 "$devclone/install.sh" 2>&1); then
       print -r -- "${y}dots — worktree setup failed:${r0}"
@@ -2839,12 +2841,15 @@ _tbeam_land() {
 # tbeam — move a Claude session between machines (send by default; --from receives)
 #
 # Usage: tbeam [flags] [repo [slot]] [host]
+#        tbeam <repo>:<id> [host]                  (beam a foreground session)
 #        tbeam <repo> [slot] --from <host>        (pull a session HERE)
 #        tbeam [repo [slot]] --here               (pull HERE, auto-find the host)
 #
 # Arguments:
 #   repo        a DEV_REPOS key → beam that dev slot's session (like tpop/tplan);
 #               omit to beam THIS conversation (inside Claude) or fzf-pick
+#   repo:id     a FOREGROUND label from `t ls` (a claude run directly in a
+#               terminal) → beam that session by id (lands in tmux unless -f)
 #   slot        which dev-<repo>-<slot> (default: its first live slot)
 #   host        destination machine (default: $TBEAM_HOST). A bare positional is
 #               read as a host only when it isn't a DEV_REPOS key.
@@ -2954,9 +2959,22 @@ _t_beam() {
     repo_arg=${pos[1]}
     if [[ ${pos[2]} == <-> ]]; then    # numeric → slot, then optional host
       slot_arg=${pos[2]}; host=${pos[3]}
+    elif [[ -z $sid_arg && ${pos[2]} == *:* ]]; then
+      # `t beam <repo> <repo>:<id>` — the second token is a FOREGROUND label from
+      # `t ls` (redundant repo prefix); beam that session by id. pos[3] is the host.
+      # Clear repo_arg so the -s id path resolves it (not the dev-slot path, which
+      # is tried first whenever repo_arg is set).
+      repo_arg=; sid_arg=${pos[2]##*:}; host=${pos[3]}
     else                               # no slot → second positional is the host
       host=${pos[2]}
     fi
+  elif [[ -z $sid_arg && ${pos[1]} == *:* ]]; then
+    # A bare FOREGROUND label — the `<repo>:<id>` shown by `t ls` for a claude run
+    # directly in a terminal (e.g. ff:727a2a8c). It has no dev slot, so route it
+    # through the -s id path below (the repo prefix is stripped); pos[2] is the host.
+    # A colon is unambiguous here (hosts/repos/slots never contain one); a bare id
+    # with no colon collides with a host name, so use `-s <id>` for that.
+    sid_arg=${pos[1]##*:}; host=${pos[2]}
   elif [[ ${pos[1]} == <-> ]]; then
     # Repo-aware: a lone numeric first positional is a SLOT of the repo $PWD is in
     # (`t beam 4` ≡ `t beam <cwd-repo> 4`, optional host after — see _t_infer_repo).
@@ -2981,7 +2999,10 @@ _t_beam() {
   #   • -s <id>  — an explicit id (full, or a unique prefix like the 8 chars the
   #     picker/tbeam show): resolve it locally to its transcript + recorded cwd,
   #     skipping both the picker and current-session mode. Lets you re-beam a
-  #     known id without picking.
+  #     known id without picking. A `<repo>:<id>` FOREGROUND label from `t ls`
+  #     passed as a positional (e.g. `t beam ff:727a2a8c`) feeds this same path
+  #     (the repo prefix is stripped above); its origin is a foreground claude, so
+  #     the kill-block below stops it by pid instead of kill-session.
   #   • inside Claude (no -p) — THIS conversation + $PWD.
   #   • otherwise — fzf-pick (scoped to $PWD; -a for every repo).
   # self_move = "the origin is THIS foreground claude" (true current-session
@@ -2999,9 +3020,13 @@ _t_beam() {
     fi
     local session="dev-${repo_arg}-${slot}"
     tmux has-session -t "$session" 2>/dev/null || { echo "tbeam: no such session: $session" >&2; return 1; }
-    sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
+    # Authoritative id (registry-first, stamp validated against the slot's repo) —
+    # must match _tbeam_kill_owner's resolution, or a stale cross-repo stamp on the
+    # origin slot would beam transcript X while the slot is actually running Y,
+    # leaving the live slot un-killed and two owners on Y after the remote resumes.
+    local dir; dir=$(tmux display-message -p -t "$session" '#{session_path}' 2>/dev/null)
+    sid=$(_dev_session_sid "$session" "$dir")
     if [[ -z $sid ]]; then                          # pre-hook fallback: newest transcript in the dir
-      local dir; dir=$(tmux display-message -p -t "$session" '#{session_path}')
       local -a tx=( "$HOME/.claude/projects/${dir//\//-}"/*.jsonl(Nom[1]) )
       sid=${${tx[1]:t}%.jsonl}
     fi
@@ -3049,7 +3074,29 @@ _t_beam() {
   #     branch), mirroring tpush's auto-exit.
   if [[ -z $self_move ]]; then
     local killed; killed=$(TB_SID=$sid _tbeam_kill_owner)
-    [[ $killed == dev-* ]] && echo "✂ Stopped the local copy ($killed) — moved to $host"
+    if [[ $killed == dev-* ]]; then
+      echo "✂ Stopped the local copy ($killed) — moved to $host"
+    else
+      # No dev slot owned the id — a FOREGROUND claude (the `<repo>:<id>` rows in
+      # `t ls`) might. Stop it too, so beaming a foreground session is a real MOVE
+      # and not two live owners: claude takes no transcript lock, so two resumers of
+      # one id diverge (the invariant tpush/tpop/_dev_adopt_fg protect). SIGTERM the
+      # pid via the registry, then wait for it to exit before $host takes over.
+      local fgpid; fgpid=$(_dev_pid_for_sid "$sid")
+      if [[ -n $fgpid ]]; then
+        kill -TERM "$fgpid" 2>/dev/null
+        local n=0
+        while kill -0 "$fgpid" 2>/dev/null && (( n++ < 100 )); do sleep 0.05; done
+        if kill -0 "$fgpid" 2>/dev/null; then
+          # Owner ignored SIGTERM (or is wedged) — warn rather than claim success,
+          # mirroring _dev_adopt_fg: the remote is about to take over, so two live
+          # claudes may briefly share the id and the transcript can interleave.
+          echo "warning: local foreground copy (pid $fgpid) didn't exit; $host resuming anyway — transcript may interleave." >&2
+        else
+          echo "✂ Stopped the local foreground copy (pid $fgpid) — moved to $host"
+        fi
+      fi
+    fi
   fi
 
   # Foreground mode: resume straight in the ssh session (needs a real terminal).
