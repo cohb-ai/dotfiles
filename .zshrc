@@ -249,26 +249,39 @@ typeset -gA DEV_REPOS DEV_BRANCHES REMOTE_HOSTS
 # override if set, else the global $DEV_BRANCH.
 _dev_branch_for() { print -r -- "${DEV_BRANCHES[$1]:-$DEV_BRANCH}" }
 
-# _dev_repo_prepare <branch> — sync a NEW session's checkout to <branch> without
-# TRAMPLING sibling sessions. Every dev-<repo>-* slot cd's into the SAME working tree,
-# so the old `git stash; checkout; pull` dance was destructive: `git stash` silently
-# pocketed a sibling's uncommitted work, and `git pull` (a merge by default) could move
-# the branch out from under a session mid-conversation. Policy now:
-#   • tree DIRTY (uncommitted changes — a sibling likely owns them) → do NOTHING, leave
-#     the checkout exactly as it is. Never stash. The new session just starts here.
-#   • tree CLEAN → fetch, switch to <branch> (creating it if missing), and pull
-#     --ff-only (never a merge/reset; matches the global pull.ff=only). A fast-forward
-#     on a clean tree is non-destructive — no sibling has local edits to lose.
-# Runs in the session's own shell (cwd = the repo, set by tmux -c / the -f `cd`).
+# _dev_repo_prepare <branch> — put a NEW session's checkout on <branch> without
+# TRAMPLING sibling sessions that share this working tree. Every dev-<repo>-* slot
+# cd's into the SAME tree, so the old `git stash; checkout; pull` dance was
+# destructive: `git stash` silently pocketed a sibling's WIP, and `git pull` (a merge
+# by default) could move the branch out from under a session mid-conversation. The
+# earlier fix over-corrected — DIRTY → do nothing — which left every session on
+# whatever branch the tree happened to be on (e.g. stuck on main), the very symptom
+# this is named for. Policy now:
+#   • Switch to <branch> (creating it if missing) EVEN WHEN the tree is dirty. We
+#     never stash: `git checkout` carries non-conflicting uncommitted edits across
+#     and refuses safely when a tracked edit would be overwritten — so the session
+#     lands on the dev branch in the common case, and a genuine conflict just leaves
+#     the checkout put (noted, not trampled; resolve it in the dev clone).
+#   • Fast-forward (`pull --ff-only`) ONLY on a clean tree: a sibling may hold WIP,
+#     and moving the branch under it mid-conversation is the trampling we avoid. When
+#     dirty we are already on <branch>, so the session just starts; the ff waits for
+#     a clean moment. (Matches the global pull.ff=only — never a merge/reset.)
+# Note: `dots` updates main in its OWN worktree (~/.local/share/dotfiles-main),
+# independent of this checkout, so keeping the dev tree on <branch> never starves
+# `dots` of main updates. Runs in the session's own shell (cwd = the repo).
 _dev_repo_prepare() {
   local branch="$1"
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    echo "↷ branch sync skipped — this shared checkout has uncommitted changes (a sibling session may own them)."
-    return 0
-  fi
   git fetch -q origin 2>/dev/null
-  git checkout -q "$branch" 2>/dev/null || git checkout -qb "$branch" 2>/dev/null
-  git pull -q --ff-only origin "$branch" 2>/dev/null || true
+  if [[ "$(git symbolic-ref --short -q HEAD)" != "$branch" ]]; then
+    git checkout -q "$branch" 2>/dev/null || git checkout -qb "$branch" 2>/dev/null || {
+      echo "↷ branch sync skipped — can't switch to $branch without overwriting local edits (commit them in the dev clone first)."
+      return 0
+    }
+  fi
+  # Only fast-forward on a clean tree — never move the branch under a sibling's WIP.
+  if [[ -z "$(git status --porcelain 2>/dev/null)" ]]; then
+    git pull -q --ff-only origin "$branch" 2>/dev/null || true
+  fi
 }
 
 # Generate a cd shortcut per repo: each key jumps straight to its dir.
