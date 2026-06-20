@@ -273,10 +273,19 @@ _dev_repo_prepare() {
   local branch="$1"
   git fetch -q origin 2>/dev/null
   if [[ "$(git symbolic-ref --short -q HEAD)" != "$branch" ]]; then
-    git checkout -q "$branch" 2>/dev/null || git checkout -qb "$branch" 2>/dev/null || {
-      echo "↷ branch sync skipped — can't switch to $branch without overwriting local edits (commit them in the dev clone first)."
-      return 0
-    }
+    # Only create <branch> when it exists nowhere: if it exists locally or on
+    # origin, a failed first checkout means a dirty edit would be overwritten —
+    # falling through to `-qb` would silently make a NEW branch at the current
+    # HEAD (often main) and the session would start on the wrong commits while
+    # believing it is on the configured dev branch.
+    if ! git checkout -q "$branch" 2>/dev/null; then
+      if git show-ref --verify --quiet "refs/heads/$branch" \
+         || git show-ref --verify --quiet "refs/remotes/origin/$branch" \
+         || ! git checkout -qb "$branch" 2>/dev/null; then
+        echo "↷ branch sync skipped — can't switch to $branch without overwriting local edits (commit them in the dev clone first)."
+        return 0
+      fi
+    fi
   fi
   # Only fast-forward on a clean tree — never move the branch under a sibling's WIP.
   if [[ -z "$(git status --porcelain 2>/dev/null)" ]]; then
