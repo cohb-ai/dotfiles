@@ -1999,6 +1999,9 @@ _dev_pull() {
   done
 
   if [[ -n $fg ]]; then
+    # Landed HERE: clear any stale "<host>: …" title a prior remote attach left set
+    # (the OSC stops Terminal auto-titling, and tmux/claude below may not overwrite it).
+    _term_title ""
     [[ -n $existing ]] && { echo "dev: already running locally in $existing — attaching."; tmux attach-session -t "$existing"; return; }
     echo "✓ Resuming ${sid[1,8]}… here"
     ( cd "$cwd" && exec claude -r "$sid" )
@@ -2016,6 +2019,10 @@ _dev_pull() {
   fi
   echo "✓ Landed here as $session"
   if [[ -t 1 && -z $CLAUDE_CODE_SESSION_ID ]]; then
+    # Title the local landing so the header reads "$session" (clearly local), NOT the
+    # stale "<host>: …" a prior remote attach set — tmux (set-titles off) swallows OSC
+    # from inside the pane, so this pre-attach write is the title that sticks.
+    _term_title "$session"
     tmux attach-session -t "$session"
   else
     echo "  Attach: tmux attach -t $session"
