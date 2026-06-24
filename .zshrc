@@ -1771,10 +1771,18 @@ _t_dev() {
   fi
 
   # `dev <repo> new` — force the next never-used slot (skip reattaching to an
-  # existing unattached session); always spins up a fresh Claude.
+  # existing unattached session); always spins up a fresh Claude. In worktree mode
+  # also skip slots whose worktree dir still exists on disk (e.g. kill-without-merge
+  # left dev/<basename>-<n> behind): _dev_worktree_create is idempotent and would
+  # REUSE that tree + branch, contradicting `new`. Mirrors the --fg path's check.
   if [[ "$slot" == new ]]; then
     local n=1
-    while tmux has-session -t "dev-${repo}-${n}" 2>/dev/null; do (( n++ )); done
+    if _dev_worktree_enabled "$repo"; then
+      while tmux has-session -t "dev-${repo}-${n}" 2>/dev/null \
+            || [[ -e "$(_dev_worktree_path "$repo" "$n")/.git" ]]; do (( n++ )); done
+    else
+      while tmux has-session -t "dev-${repo}-${n}" 2>/dev/null; do (( n++ )); done
+    fi
     slot=$n
   fi
 
@@ -2659,8 +2667,13 @@ _dev_slot_for_cwd() {
   fi
   [[ -n "$match" ]] || return 1
 
-  # A worktree path names its own slot — re-land into it when that slot is free.
-  if [[ -n $slot ]] && ! tmux has-session -t "dev-${match}-${slot}" 2>/dev/null; then
+  # A worktree path names its own slot: that's the ONLY slot whose cwd is this dir
+  # (one worktree per slot). Free → use it; taken → FAIL rather than fall into the
+  # generic scan, which would return a different slot number while cwd stays pinned
+  # to this worktree — pairing the new slot with another slot's checkout/branch and
+  # colliding with the live owner already in it. Callers handle the "couldn't map".
+  if [[ -n $slot ]]; then
+    tmux has-session -t "dev-${match}-${slot}" 2>/dev/null && return 1
     print -r -- "$match $slot"; return 0
   fi
   # Else next free slot: first dev-<repo>-<n> with no running session (mirrors `dev`).
