@@ -3288,7 +3288,14 @@ _t_beam() {
   fi
   [[ $sid == "$CLAUDE_CODE_SESSION_ID" && -n $CLAUDE_CODE_SESSION_ID ]] && self_move=1
   [[ -n $CLAUDE_CODE_SESSION_ID ]] && detach=1      # no TTY in Claude's Bash subprocess to ssh -t into
-  [[ -d $cwd ]] || { echo "tbeam: session's directory no longer exists: $cwd" >&2; return 1; }
+  # Resume-through-sync: a picked session may be a per-session worktree absent here
+  # (created on another machine, or reaped after merge). Rebuild it from its branch
+  # rather than failing — matches the same fix in _t_push / _t_find so all three
+  # callers of _claude_sessions_fzf recover identically.
+  local resolved
+  resolved=$(_dev_ensure_session_cwd "$cwd") \
+    || { echo "tbeam: session's directory no longer exists and could not be rebuilt: $cwd" >&2; return 1; }
+  cwd=$resolved
 
   # The far side resumes by cd'ing into the same path — bail early if it's absent.
   if ! ssh "$host" "test -d ${(q)cwd}" 2>/dev/null; then
