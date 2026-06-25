@@ -1074,6 +1074,27 @@ _dev_dir_in_scope() {
   [[ -n $DEV_WORKTREE_ROOT && $d == $DEV_WORKTREE_ROOT/${scope:t}/* ]]
 }
 
+# _dev_ensure_session_cwd <cwd> — print a directory in which a session recorded at <cwd>
+# can be resumed, materializing it on demand. <cwd> still present → echo it unchanged.
+# <cwd> is a per-session worktree that is ABSENT here — a transcript synced from another
+# machine (only the branch + transcript travel, never the ephemeral worktree) or a slot
+# whose worktree was reaped after merge — → rebuild it from its branch on origin via
+# _dev_worktree_create and echo the (identical) path, so `claude -r` lands on the same cwd
+# the transcript recorded. Returns 1 when <cwd> is gone and is not a recoverable worktree
+# (a non-DEV dir, or a worktree-opt-out repo) so the caller can error. This is what
+# restores manual resume-through-sync under worktree-per-session: the worktree dir is
+# ephemeral, but its branch + transcript are durable, so we rebuild the dir when needed —
+# the same engine tbeam's _tbeam_land / _dev_pull already use on the receive side.
+_dev_ensure_session_cwd() {
+  local cwd="$1"
+  [[ -d $cwd ]] && { print -r -- "$cwd"; return 0; }
+  local r repo slot; r=$(_dev_repo_of_dir "$cwd") || return 1
+  repo=${r%%$'\t'*}; slot=${r#*$'\t'}
+  [[ -n $repo && -n $slot ]] || return 1   # not a worktree path → nothing to rebuild
+  _dev_worktree_enabled "$repo" || return 1
+  _dev_worktree_create "$repo" "$slot"     # prints the rebuilt path, or returns 1
+}
+
 # _dev_cwd_repo_dir — print the canonical DEV_REPOS directory that contains $PWD (or
 # whose worktree contains $PWD), else nothing. The scope source for `dev ls`. Derived
 # from _dev_repo_of_dir so it is worktree-aware: standing inside a slot's worktree still
@@ -2534,12 +2555,36 @@ _claude_session_rows() {
   local projects="$HOME/.claude/projects"
   [[ -d $projects ]] || { echo "No Claude sessions at $projects" >&2; return 1; }
   local filter="${1:-}" query="${2:-}"
+  # Worktree-aware scoping: a per-session worktree's recorded cwd lives under
+  # DEV_WORKTREE_ROOT, NOT under the repo dir, so a raw-$PWD prefix match would hide every
+  # worktree session of the repo you are standing in — including one synced from another
+  # machine, where only the branch + transcript travel (the worktree dir never does). So
+  # resolve the filter to its canonical repo dir (works whether $PWD is the repo or one of
+  # its worktrees) and hand python both that dir and DEV_WORKTREE_ROOT so it also matches
+  # the repo's worktrees (mirrors _dev_dir_in_scope). Non-DEV dirs keep the raw prefix.
+  if [[ -n $filter ]]; then
+    local _r; _r=$(_dev_repo_of_dir "$filter" 2>/dev/null)
+    [[ -n $_r ]] && filter="${DEV_REPOS[${_r%%$'\t'*}]}"
+  fi
 
-  python3 - "$projects" "$filter" "$query" <<'PY'
+  DEV_WORKTREE_ROOT="$DEV_WORKTREE_ROOT" python3 - "$projects" "$filter" "$query" <<'PY'
 import json, os, sys, glob, datetime
 root = sys.argv[1]
 filt = sys.argv[2] if len(sys.argv) > 2 else ''
 query = sys.argv[3] if len(sys.argv) > 3 else ''
+# DEV_WORKTREE_ROOT lets the scope test treat a per-session worktree
+# ($DEV_WORKTREE_ROOT/<repo-basename>/<slot>) as belonging to its repo — the twin of the
+# zsh _dev_dir_in_scope, so the repo-scoped picker shows worktree (incl. synced) sessions.
+wt_root = os.environ.get('DEV_WORKTREE_ROOT', '')
+def _in_scope(cwd):
+    if not filt:
+        return True
+    cwd = cwd or ''
+    if cwd == filt or cwd.startswith(filt + os.sep):
+        return True
+    if wt_root and cwd.startswith(os.path.join(wt_root, os.path.basename(filt.rstrip('/'))) + os.sep):
+        return True
+    return False
 # Query terms, minus a few stopwords so "redesign of portfolio tab" matches on
 # the words that carry meaning, not "of". Short tokens like "ui"/"db" survive.
 STOP = {'of','the','a','an','to','on','in','for','and','is','it','with','at'}
@@ -2581,7 +2626,7 @@ for f in glob.glob(os.path.join(root, '*', '*.jsonl')):
                 except ValueError: pass
     except OSError:
         continue
-    if filt and not (cwd == filt or (cwd or '').startswith(filt + os.sep)):
+    if not _in_scope(cwd):
         continue
     # ── Relevance scoring (search mode) ──────────────────────────────────────
     # The tunable heart of `tfind`: how much each match counts. A term in the
@@ -2796,7 +2841,12 @@ _t_push() {
     cwd=${${row#*$'\t'}%%$'\t'*}
   fi
 
-  [[ -d $cwd ]] || { echo "Session's directory no longer exists: $cwd"; return 1; }
+  # Resume-through-sync: a session picked from a synced transcript may be a per-session
+  # worktree that does not exist here (it was created on another machine, or reaped after
+  # merge). Rebuild it from its branch rather than hard-failing; only a truly unrecoverable
+  # dir (non-DEV, or worktree-opt-out repo) errors out.
+  cwd=$(_dev_ensure_session_cwd "$cwd") \
+    || { echo "Session's directory no longer exists and could not be rebuilt: $cwd" >&2; return 1; }
 
   # Already backgrounded? If this exact conversation is running under any slot,
   # reuse it rather than spawning a duplicate. _dev_resume_session stashes
