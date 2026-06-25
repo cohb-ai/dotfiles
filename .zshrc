@@ -2845,8 +2845,10 @@ _t_push() {
   # worktree that does not exist here (it was created on another machine, or reaped after
   # merge). Rebuild it from its branch rather than hard-failing; only a truly unrecoverable
   # dir (non-DEV, or worktree-opt-out repo) errors out.
-  cwd=$(_dev_ensure_session_cwd "$cwd") \
+  local resolved
+  resolved=$(_dev_ensure_session_cwd "$cwd") \
     || { echo "Session's directory no longer exists and could not be rebuilt: $cwd" >&2; return 1; }
+  cwd=$resolved
 
   # Already backgrounded? If this exact conversation is running under any slot,
   # reuse it rather than spawning a duplicate. _dev_resume_session stashes
