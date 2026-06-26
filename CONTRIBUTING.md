@@ -4,6 +4,13 @@ This is a **personal, opinionated dotfiles repo** — one person's macOS + zsh +
 Claude Code setup, published in case the patterns are useful to borrow. It is not
 a framework and isn't trying to be portable, configurable, or general-purpose.
 
+## Contributor License Agreement
+
+By opening a pull request you agree to the [Contributor License Agreement](./CLA.md):
+your contribution is your own original work, you have the right to contribute it, and
+you license it under the [MIT License](./LICENSE). There's nothing to sign — opening
+the PR is your acceptance.
+
 ## What that means for you
 
 - **Fork freely.** The most useful thing you can do is copy whatever's handy into

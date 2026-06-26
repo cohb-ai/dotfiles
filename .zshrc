@@ -2337,14 +2337,15 @@ _t_plan() {
 _t_find() {
   local keyword=
   [[ "$1" == "-k" || "$1" == "--keyword" ]] && { keyword=1; shift; }
-  [[ -n "$1" ]] || { echo "Usage: tfind [-k] <words describing the session>"; return 1; }
   if [[ -n $TMUX && -n $CLAUDE_CODE_SESSION_ID ]]; then
     echo "Run tfind from a plain shell — it resumes a session in the foreground." >&2
     return 1
   fi
   local row
-  if [[ -n $keyword ]]; then
-    row=$(_claude_sessions_fzf "" "$*") || return 1       # offline keyword rank
+  # No query → browse newest-first (matches `t find -h`); Sonnet has nothing to rank
+  # without a query, so route through the keyword/browse picker even without -k.
+  if [[ -n $keyword || -z "$*" ]]; then
+    row=$(_claude_sessions_fzf "" "$*") || return 1       # offline keyword rank / browse
   else
     row=$(_claude_sessions_semantic "$*") || return 1     # Sonnet-reranked
   fi
@@ -3294,7 +3295,7 @@ _t_beam() {
   # and creating a local worktree would leave a stray checkout behind on a move. For the
   # same reason, only require the cwd to pre-exist on the host for NON-worktree paths;
   # worktree paths (under $DEV_WORKTREE_ROOT) are materialized by _tbeam_land.
-  if [[ -z $DEV_WORKTREE_ROOT || $cwd != $DEV_WORKTREE_ROOT/* ]]; then
+  if [[ -z $DEV_WORKTREE_ROOT || $cwd != $DEV_WORKTREE_ROOT/*/* ]]; then
     if ! ssh "$host" "test -d ${(q)cwd}" 2>/dev/null; then
       echo "tbeam: $cwd doesn't exist on $host — clone/sync the repo there first." >&2
       return 1
