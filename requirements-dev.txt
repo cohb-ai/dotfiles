@@ -2,5 +2,7 @@
 # user-facing dotfiles stay dependency-free. Install with:
 #   pip install -r requirements-dev.txt
 # then run the suite with `python3 -m pytest`.
-pytest>=8,<9
+# pytest floor is 9.0.3: earlier 8.x/9.0.x carry CVE-2025-71176, fixed in 9.0.3
+# (flagged by the pip-audit CI job). pytest-cov 6.x is compatible with pytest 9.
+pytest>=9.0.3,<10
 pytest-cov>=5,<7
