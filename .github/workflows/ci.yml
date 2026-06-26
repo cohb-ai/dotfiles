@@ -124,6 +124,55 @@ jobs:
       - name: Run tests with coverage gate
         run: pytest --cov --cov-report=term-missing --cov-fail-under=95
 
+  # Audit the CI/dev dependencies (requirements-dev.txt) for known CVEs. This is
+  # the only dependency manifest in the repo — install.sh stays dependency-free,
+  # so there is nothing else to scan — but these deps still run in the Actions
+  # runner, so a vulnerable pytest/pytest-cov is worth catching. `-r` resolves the
+  # pins without installing them into the job env. Fails the job on any advisory.
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Audit CI/dev dependencies for known CVEs
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements-dev.txt
+
+  # CodeQL static analysis (SAST) over the Python. Only `python` is requested:
+  # CodeQL has no shell language, so the Bash scripts (install.sh, bin/csync,
+  # sleep-manager, …) are out of scope here — shellcheck covers them. The two
+  # interesting targets, bin/t and bin/pr-watch, are EXTENSIONLESS; CodeQL's
+  # Python extractor finds them anyway via their `#!/usr/bin/env python3` shebang
+  # (plus tests/*.py by extension). Do NOT add a paths/extension filter to "tidy"
+  # this — a `.py`-only filter would silently drop the bins that shell out and
+  # (pr-watch) auto-push, which are the whole reason this job exists. Python is
+  # interpreted, so no autobuild step is needed: init → analyze.
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      # Job-level permissions REPLACE the workflow-level `contents: read`, so
+      # every scope CodeQL needs must be listed here (see scorecard.yml).
+      actions: read
+      contents: read
+      security-events: write   # upload SARIF results to the Security tab
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+
   # The single required status check. Turns green only when every job above
   # succeeds (or is legitimately skipped, e.g. pii-scan on fork/Dependabot PRs).
   # `if: always()` is load-bearing: without it the gate is itself skipped when a
@@ -132,7 +181,7 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [shellcheck, gitleaks, pii-scan, pytest]
+    needs: [shellcheck, gitleaks, pii-scan, pytest, pip-audit, codeql]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all required jobs passed
