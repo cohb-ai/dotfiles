@@ -29,7 +29,7 @@ jobs:
       security-events: write   # upload SARIF to the Security tab
       id-token: write          # publish results to the OpenSSF API
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
