@@ -839,7 +839,7 @@ PY
 _dev_summary_for_pid() {
   setopt local_options null_glob bare_glob_qual
   local dir="$1" cpid="$2"
-  local proj="$HOME/.claude/projects/${dir//\//-}" start
+  local proj="$HOME/.claude/projects/${dir//[^A-Za-z0-9]/-}" start
   local -a tx
   if [[ -n $cpid ]]; then
     start=$(ps -o lstart= -p "$cpid" 2>/dev/null)
@@ -887,7 +887,7 @@ _dev_session_sid() {
   fi
   sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
   [[ -n $sid ]] || return 0
-  local -a tx=( "$HOME/.claude/projects/${dir//\//-}/$sid".jsonl(N) )
+  local -a tx=( "$HOME/.claude/projects/${dir//[^A-Za-z0-9]/-}/$sid".jsonl(N) )
   [[ -n ${tx[1]} ]] && print -r -- "$sid"
   return 0
 }
@@ -904,7 +904,7 @@ _dev_session_summary() {
   if [[ -n $sid ]]; then
     # A valid id (registry or validated stamp) always has its transcript under this
     # slot's own project dir, since the dir IS the conversation's cwd.
-    local -a tx=( "$HOME/.claude/projects/${dir//\//-}/$sid".jsonl(N) )
+    local -a tx=( "$HOME/.claude/projects/${dir//[^A-Za-z0-9]/-}/$sid".jsonl(N) )
     [[ -n ${tx[1]} ]] && { _transcript_title "${tx[1]}"; return 0; }
   fi
   _dev_summary_for_pid "$dir" "$(_dev_session_claude_pid "$session")"
@@ -2369,7 +2369,7 @@ _t_plan() {
     sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
     if [[ -z $sid ]]; then
       local dir; dir=$(tmux display-message -p -t "$session" '#{session_path}')
-      local -a tx=( "$HOME/.claude/projects/${dir//\//-}"/*.jsonl(Nom[1]) )
+      local -a tx=( "$HOME/.claude/projects/${dir//[^A-Za-z0-9]/-}"/*.jsonl(Nom[1]) )
       sid=${${tx[1]:t}%.jsonl}
     fi
     [[ -n $sid ]] || { echo "Couldn't find a session id for $session." >&2; return 1; }
@@ -3038,7 +3038,7 @@ _t_pop() {
   sid=$(tmux show-environment -t "$session" CLAUDE_RESUME_ID 2>/dev/null | cut -d= -f2)
   if [[ -z $sid ]]; then
     # newest transcript for the dir: (N)ullglob, (om) order by mtime, [1] = first
-    local -a tx=( "$HOME/.claude/projects/${dir//\//-}"/*.jsonl(Nom[1]) )
+    local -a tx=( "$HOME/.claude/projects/${dir//[^A-Za-z0-9]/-}"/*.jsonl(Nom[1]) )
     sid=${${tx[1]:t}%.jsonl}
   fi
   [[ -n $sid ]] || { echo "Couldn't find a session id for $session ($dir)."; return 1; }
@@ -3066,7 +3066,8 @@ _t_pop() {
 
 # _tbeam_sync_transcript <cwd> <host> — copy a session's transcript dir to <host>
 # before it's resumed there. The conversation lives in
-# ~/.claude/projects/<cwd-with-slashes-as-dashes>/, and `claude -r <sid>` on the
+# ~/.claude/projects/<cwd-with-non-alnum-as-dashes>/ (/ and . alike → -, so a
+# worktree path under .worktrees encodes to --worktrees), and `claude -r <sid>` on the
 # far side can only resume what's already on its disk — so the bytes must land
 # first. csync/iCloud is the background convergence path; this is the immediate,
 # deterministic push for "beam it *now*".
@@ -3077,7 +3078,7 @@ _t_pop() {
 # (you'd worked there more recently) it's preserved rather than clobbered.
 _tbeam_sync_transcript() {
   local cwd="$1" host="$2"
-  local enc="${cwd//\//-}"                       # /a/b → -a-b, Claude's dir scheme
+  local enc="${cwd//[^A-Za-z0-9]/-}"             # /a/b → -a-b, Claude's dir scheme (/ AND . → -)
   local src="$HOME/.claude/projects/$enc/"
   [[ -d $src ]] || { echo "tbeam: no transcript dir for $cwd ($src)" >&2; return 1; }
   rsync -az --update --exclude='.DS_Store' -e ssh "$src" "$host:.claude/projects/$enc/"
@@ -3090,7 +3091,7 @@ _tbeam_sync_transcript() {
 # beam flows.
 _tbeam_pull_transcript() {
   local cwd="$1" host="$2"
-  local enc="${cwd//\//-}"                          # /a/b → -a-b, Claude's dir scheme
+  local enc="${cwd//[^A-Za-z0-9]/-}"                # /a/b → -a-b, Claude's dir scheme (/ AND . → -)
   local dst="$HOME/.claude/projects/$enc/"
   mkdir -p "$dst"
   rsync -az --update --exclude='.DS_Store' -e ssh "$host:.claude/projects/$enc/" "$dst"
@@ -3337,7 +3338,7 @@ _t_beam() {
     local dir; dir=$(tmux display-message -p -t "$session" '#{session_path}' 2>/dev/null)
     sid=$(_dev_session_sid "$session" "$dir")
     if [[ -z $sid ]]; then                          # pre-hook fallback: newest transcript in the dir
-      local -a tx=( "$HOME/.claude/projects/${dir//\//-}"/*.jsonl(Nom[1]) )
+      local -a tx=( "$HOME/.claude/projects/${dir//[^A-Za-z0-9]/-}"/*.jsonl(Nom[1]) )
       sid=${${tx[1]:t}%.jsonl}
     fi
     [[ -n $sid ]] || { echo "tbeam: couldn't find a session id for $session" >&2; return 1; }
