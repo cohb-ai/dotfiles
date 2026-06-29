@@ -317,7 +317,7 @@ _dev_worktree_create() {
 # not yet on the destination — same degraded-not-lost contract as the foreground-kill warning.
 _dev_worktree_beam_push() {
   local wt="${1:-$TB_WT}" host="${2:-$TB_HOST}"
-  [[ -n $DEV_WORKTREE_ROOT && $wt == ${DEV_WORKTREE_ROOT}/* && -e $wt/.git ]] || return 0
+  [[ -n $DEV_WORKTREE_ROOT && $wt == ${DEV_WORKTREE_ROOT}/*/* && -e $wt/.git ]] || return 0
   local br; br=$(git -C "$wt" symbolic-ref --short -q HEAD) || return 0
   if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
     git -C "$wt" add -A 2>/dev/null
@@ -348,7 +348,7 @@ _dev_worktree_beam_push() {
 # style (the sweep's "any inconclusive answer = do NOT clobber", _dev_repo_prepare's refuse-not-stash).
 _dev_worktree_beam_sync() {
   local wt="$1"
-  [[ -n $DEV_WORKTREE_ROOT && $wt == ${DEV_WORKTREE_ROOT}/* && -e $wt/.git ]] || return 0
+  [[ -n $DEV_WORKTREE_ROOT && $wt == ${DEV_WORKTREE_ROOT}/*/* && -e $wt/.git ]] || return 0
   local br; br=$(git -C "$wt" symbolic-ref --short -q HEAD) || return 0
   git -C "$wt" fetch -q origin 2>/dev/null
   local head ref
