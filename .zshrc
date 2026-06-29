@@ -322,8 +322,8 @@ _dev_worktree_beam_push() {
   if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
     git -C "$wt" add -A 2>/dev/null
     if ! git -C "$wt" commit -q -m "wip: beam to ${host:-another host} [skip ci]" 2>/dev/null; then
-      print -r -- "tbeam: couldn't commit WIP in ${wt} (pre-commit hook?) — destination won't see your latest edits" >&2
-      return 0
+      print -r -- "tbeam: couldn't commit WIP in ${wt} (pre-commit hook?) — destination won't see your latest uncommitted edits" >&2
+      # Still push: any earlier committed-but-unpushed work on this branch should still reach origin.
     fi
   fi
   if git -C "$wt" push -q origin "HEAD:${br}" 2>/dev/null; then
@@ -350,10 +350,14 @@ _dev_worktree_beam_sync() {
   local wt="$1"
   [[ -n $DEV_WORKTREE_ROOT && $wt == ${DEV_WORKTREE_ROOT}/*/* && -e $wt/.git ]] || return 0
   local br; br=$(git -C "$wt" symbolic-ref --short -q HEAD) || return 0
-  git -C "$wt" fetch -q origin 2>/dev/null
+  local fetched=1
+  git -C "$wt" fetch -q origin 2>/dev/null || fetched=0
   local head ref
   head=$(git -C "$wt" rev-parse -q HEAD 2>/dev/null)
   ref=$(git -C "$wt" rev-parse -q --verify "origin/${br}" 2>/dev/null)
+  # If fetch failed, origin/${br} may be stale — warn so a missed beam edit isn't silent —
+  # but still try the FF below in case the remote-tracking ref happens to be current.
+  (( fetched )) || print -r -- "tbeam: couldn't fetch origin in ${wt} — origin/${br} may be stale" >&2
   [[ -n $ref && $head != "$ref" ]] || return 0          # no remote branch, or already at the tip
   if git -C "$wt" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
     if git -C "$wt" merge -q --ff-only "origin/${br}" 2>/dev/null; then
